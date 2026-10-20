@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#16a34a">
+  <meta name="description" content="Ma Ngal Lay — offline product & price book for your local mini store.">
+  <title>Ma Ngal Lay</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="fonts/fonts.css">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.1/dist/mobilenet.min.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">မ</span>
+      <h1>Ma Ngal Lay</h1>
+    </div>
+    <div class="topbar-right">
+      <div class="inv-value" id="invValue">Stock worth 0 K</div>
+      <button class="sync-dot local" id="syncDot" type="button" aria-label="Cloud sync: local only" title="Local only"></button>
+    </div>
+  </header>
+
+  <main>
+    <section id="screen-products" class="screen active">
+      <div class="tools">
+        <div class="search-wrap">
+          <span class="search-ic">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16.5 16.5 21 21"/></svg>
+          </span>
+          <input id="searchInput" type="search" placeholder="Search products, scan or image..." autocomplete="off">
+          <button class="search-clear" id="searchClear" hidden aria-label="Clear">✕</button>
+          <button class="scan-btn" id="imgSearchBtn" aria-label="Image search" style="right: 70px;">🖼️</button>
+          <button class="scan-btn" id="scanBtn" aria-label="Scan barcode">📷</button>
+        </div>
+        <div class="chips" id="chips"></div>
+      </div>
+      <div class="grid" id="productGrid"></div>
+      <div class="empty" id="emptyState" hidden>
+        <div class="empty-ic">📦</div>
+        <p id="emptyText">No products yet</p>
+        <p class="empty-hint">Tap the + button to add your first product</p>
+      </div>
+    </section>
+
+    <section id="screen-cart" class="screen">
+      <div class="tools">
+        <div class="search-wrap">
+          <span class="search-ic">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16.5 16.5 21 21"/></svg>
+          </span>
+          <input id="cartSearchInput" type="search" placeholder="Tap a product, scan or image..." autocomplete="off">
+          <button class="search-clear" id="cartSearchClear" hidden aria-label="Clear">✕</button>
+          <button class="scan-btn" id="imgSearchBtnCart" aria-label="Image search" style="right: 70px;">🖼️</button>
+          <button class="scan-btn" id="scanBtnCart" aria-label="Scan barcode">📷</button>
+        </div>
+        <div class="chips" id="cartChips"></div>
+      </div>
+      <div class="grid" id="posGrid"></div>
+      <div class="empty" id="posEmpty" hidden>
+        <div class="empty-ic">📦</div>
+        <p id="posEmptyText">No products yet</p>
+        <p class="empty-hint">Add products from the Products tab first</p>
+      </div>
+      <h3 class="section-title" id="voucherTitle" hidden>Voucher</h3>
+      <div class="cart-list" id="cartList"></div>
+      <div class="cart-empty empty" id="cartEmpty">
+        <div class="empty-ic">🧾</div>
+        <p>Nothing on the bill yet</p>
+        <p class="empty-hint">Tap products above to add them</p>
+      </div>
+      <div class="cart-footer" id="cartFooter" hidden>
+        <div class="cart-sum">
+          <span id="cartCount">0 items</span>
+          <span class="total-label">TOTAL</span>
+        </div>
+        <div class="total" id="cartTotal">0 K</div>
+        <button id="checkoutBtn" class="btn primary big">Complete Sale</button>
+      </div>
+    </section>
+
+    <section id="screen-history" class="screen">
+      <div class="subtabs">
+        <button data-htab="sales" class="active">💰 Sales</button>
+        <button data-htab="changes">📝 Changes</button>
+      </div>
+      <div id="history-sales">
+        <div class="rev-grid">
+          <div class="rev-card"><span>Today</span><strong id="revToday">0 K</strong></div>
+          <div class="rev-card"><span>This Week</span><strong id="revWeek">0 K</strong></div>
+          <div class="rev-card"><span>This Month</span><strong id="revMonth">0 K</strong></div>
+          <div class="rev-card"><span>All Time</span><strong id="revAll">0 K</strong></div>
+        </div>
+        <h3 class="section-title">Daily revenue</h3>
+        <div class="log-list" id="dailyList"></div>
+        <h3 class="section-title">Sales history</h3>
+        <div class="log-list" id="salesList"></div>
+      </div>
+      <div id="history-changes" hidden>
+        <h3 class="section-title">Product add / edit history</h3>
+        <div class="log-list" id="changesList"></div>
+      </div>
+    </section>
+
+    <section id="screen-settings" class="screen">
+      <div class="settings-card">
+        <h2>Cloud sync</h2>
+        <p class="about" id="syncStatusText">Local only — data stays on this device.</p>
+        <p class="about sync-project" id="syncProjectText">No Firebase project configured. Add firebase-config.js to sync across devices.</p>
+        <h2>Backup &amp; Restore</h2>
+        <button id="exportBtn" class="btn block">⬇ Export backup (JSON)</button>
+        <button id="importBtn" class="btn block">⬆ Import backup</button>
+        <input type="file" id="importFile" accept="application/json,.json" hidden>
+        <h2>About</h2>
+        <p class="about">
+          <strong>Ma Ngal Lay</strong> — product &amp; price book and point-of-sale for your shop.<br>
+          Data is stored on this device; when Firebase is configured it also syncs across your devices. Prices in MMK.<br><br>
+          To install: open in Chrome → menu → <em>Add to Home screen</em>.
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <button id="fab" class="fab" aria-label="Add product">＋</button>
+
+  <nav class="bottomnav">
+    <button data-tab="products" class="active">
+      <span class="nav-ic">🏷️</span><span>Products</span>
+    </button>
+    <button data-tab="cart">
+      <span class="nav-ic">🛒</span><span>Bill</span>
+      <span class="badge" id="cartBadge" hidden>0</span>
+    </button>
+    <button data-tab="history">
+      <span class="nav-ic">📊</span><span>History</span>
+    </button>
+    <button data-tab="settings">
+      <span class="nav-ic">⚙️</span><span>Settings</span>
+    </button>
+  </nav>
+
+  <div class="sheet-backdrop" id="productSheet" hidden>
+    <div class="sheet" role="dialog" aria-modal="true">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <h2 id="sheetTitle">Add Product</h2>
+        <button class="icon-btn" id="sheetClose" aria-label="Close">✕</button>
+      </div>
+      <div class="sheet-body">
+        <label class="photo-picker" id="photoPicker">
+          <img id="photoPreview" alt="" hidden>
+          <span class="photo-placeholder" id="photoPlaceholder">📷<br>Add photo</span>
+          <input type="file" id="photoInput" accept="image/*" class="visually-hidden">
+        </label>
+        <label class="field">Name
+          <input id="fName" type="text" placeholder="e.g. Mayonnaise 500ml" autocomplete="off">
+        </label>
+        <label class="field">Category
+          <input id="fCategory" type="text" list="categoryList" placeholder="e.g. Grocery" autocomplete="off">
+          <datalist id="categoryList"></datalist>
+        </label>
+        <label class="field">Barcode/QR Code (optional)
+          <div style="display:flex; gap:8px; align-items:center;">
+            <input id="fBarcode" type="text" placeholder="Scan or enter barcode" autocomplete="off" style="flex:1; margin-top:6px;">
+            <button type="button" id="scanBarcodeFieldBtn" class="icon-btn" style="margin-top:6px;" aria-label="Scan barcode">📷</button>
+          </div>
+        </label>
+        <div class="field-row">
+          <label class="field">Price (MMK)
+            <input id="fPrice" type="text" inputmode="numeric" placeholder="1500">
+          </label>
+          <label class="field">Stock (optional)
+            <input id="fStock" type="text" inputmode="numeric" placeholder="0">
+          </label>
+        </div>
+        <p class="form-error" id="formError" hidden></p>
+        <button id="deleteBtn" class="btn danger block" hidden>Delete Product</button>
+        <button id="saveBtn" class="btn primary big block">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="sheet-backdrop center" id="confirmDialog" hidden>
+    <div class="confirm" role="alertdialog" aria-modal="true">
+      <p id="confirmText"></p>
+      <div class="confirm-actions">
+        <button id="confirmNo" class="btn">Cancel</button>
+        <button id="confirmYes" class="btn danger">Yes</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <div class="sheet-backdrop center" id="scanModal" hidden>
+    <div class="confirm" style="max-width: 420px; width: 90%;">
+      <p>Scan Barcode/QR Code</p>
+      <div id="scanner" style="width: 100%; margin-bottom: 16px;"></div>
+      <div class="confirm-actions" style="grid-template-columns: 1fr;">
+        <button id="scanCloseBtn" class="btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="sheet-backdrop center" id="imageSearchModal" hidden>
+    <div class="confirm" style="max-width: 420px; width: 90%;">
+      <p>Search by Image</p>
+      <div id="imgPreviewContainer" style="margin-bottom: 16px;">
+        <img id="imgPreview" style="max-width: 100%; border-radius: 8px; max-height: 300px;">
+      </div>
+      <div id="imgPredictions" style="font-size: 13px; margin-bottom: 16px; text-align: left;"></div>
+      <input type="file" id="imageSearchInput" accept="image/*" hidden>
+      <div class="confirm-actions">
+        <button id="imgSearchPickBtn" class="btn">Pick Photo</button>
+        <button id="imgSearchCloseBtn" class="btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Firebase config is optional: the app stays local-only until it is filled in. -->
+  <script src="firebase-config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
