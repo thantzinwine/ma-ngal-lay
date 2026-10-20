@@ -1,55 +1,76 @@
 # Firebase Setup for Ma Ngal Lay
 
-The app is local-first. It works completely offline and stores data in IndexedDB.
-Firestore is optional and turns on **cross-device sync** for products, sales and
-the product change log.
+**Status: configured and live.**
 
-## 1. Create the Firebase project
+- Firebase project: `ma-ngal-lay-shop-2026`
+- Firestore database: `(default)`, Firestore Native
+- Web app: `ministore`
+- Rules: deployed from `firestore.rules`
+- Config: filled in `firebase-config.js`
 
-1. Go to [Firebase Console](https://console.firebase.google.com/) and sign in.
-2. Click **Create a project** (for example `ma-ngal-lay`).
-3. Google Analytics is optional.
+## Live URLs
 
-## 2. Enable Firestore
+| Host | URL | Notes |
+| --- | --- | --- |
+| **GitHub Pages** | https://thantzinwine.github.io/ma-ngal-lay/ | **Recommended.** Works on networks that block Firebase Hosting. |
+| Firebase Hosting | https://ma-ngal-lay-shop-2026.web.app | Same app and same data. Currently times out on this PC's network. |
 
-1. Open **Build → Firestore Database**.
-2. Click **Create database**.
-3. Choose a location close to the shop.
-4. Start in **test mode** for now; the rules are published in step 5.
+Both URLs share the same Firestore data, so a product added on one is visible on
+the other. Either URL can be installed as a PWA: open it in Chrome → menu →
+**Add to Home screen**.
 
-## 3. Get the web app config
+> **Why two hosts?** The current network cannot reach Firebase Hosting's IP
+> (`199.36.158.100`), although the site itself is live. GitHub Pages is
+> reachable, so it is the primary URL. The Firebase deployment still works on
+> other networks.
 
-1. Open **Project settings** (gear icon) → **General**.
-2. Scroll to **Your apps** and click the web icon `</>`.
-3. Register the app with a nickname such as `ma-ngal-lay-web`.
-4. Copy the `firebaseConfig` values.
+## What is already done
 
-## 4. Add the config to the app
+1. Created the Firebase project `ma-ngal-lay-shop-2026`.
+2. Created the Firestore database in `asia-southeast1` (Singapore).
+3. Registered the web app `ministore` and copied its config into
+   `firebase-config.js`.
+4. Published `firestore.rules` (only `products`, `sales`, `changes` are
+   accessible).
+5. Deployed the site to Firebase Hosting.
+6. Published a copy to GitHub Pages and verified real cross-device sync.
 
-Open `firebase-config.js` and replace the placeholders:
+No further Firebase console work is required.
 
-```js
-window.FIREBASE_CONFIG = {
-  apiKey: "AIza...",
-  authDomain: "ma-ngal-lay.firebaseapp.com",
-  projectId: "ma-ngal-lay",
-  storageBucket: "ma-ngal-lay.firebasestorage.app",
-  messagingSenderId: "1234567890",
-  appId: "1:1234567890:web:abcdef123456"
-};
+## Day-to-day use
+
+- Open either live URL on the shop phone and PC.
+- On first connect, local products/sales/changes are uploaded to Firestore if
+  the cloud copy is empty.
+- Every add/edit/delete, sale, and change-log entry is saved to IndexedDB
+  first, then synced to Firestore.
+- Offline use is fully supported. Pending writes are queued and sent when the
+  connection returns.
+- Use **Settings → Backup & Restore** for a JSON backup before big changes.
+
+## Updating the app
+
+GitHub Pages (primary host) rebuilds automatically from `main`:
+
+```powershell
+cd D:\majortest\minimart2
+git add .
+git commit -m "Describe the change"
+git push
 ```
 
-Reload the app. The small dot in the top-right corner turns green when sync is
-connected. If the config is left as `PASTE_...`, the app stays in local-only mode
-and never tries to contact Firebase.
+Firebase Hosting (optional, for other networks):
 
-> The Firebase web config is public by design; it is safe to ship in a web app.
-> Firestore access is controlled by rules, not by hiding the config.
+```powershell
+firebase deploy --only hosting
+```
 
-## 5. Publish the Firestore rules
+After changing `sw.js`, bump `CACHE` in that file so installed clients fetch
+the new assets.
 
-The rules in this repo only allow the app's three collections and block
-everything else:
+## Firestore rules
+
+The deployed rules allow read/write only on the three collections the app uses:
 
 ```javascript
 rules_version = '2';
@@ -63,56 +84,50 @@ service cloud.firestore {
 }
 ```
 
-Publish them either by pasting into **Firestore Database → Rules → Publish**, or
-with the Firebase CLI:
+Redeploy after editing `firestore.rules`:
 
-```bash
-firebase login
-firebase use --add          # choose your project
+```powershell
 firebase deploy --only firestore:rules
 ```
 
-**Security note:** these rules allow anyone who can load the site to read/write
-the shop data. That is acceptable for a small trusted shop, but do not store
-sensitive information in this Firebase project.
+## Security note
 
-## 6. Deploy the app (optional)
+These rules allow anyone who has the site URL to read and write the shop data.
+That is acceptable for a small trusted shop, but:
 
-`firebase.json` is already configured to host this folder:
+- Keep the live URL private; do not post it publicly.
+- Do not store sensitive customer information in this project.
+- For stronger protection, add Firebase Authentication (anonymous or email)
+  and change the rules to require `request.auth != null`.
+- The Firebase web config (API key, project ID) is public by design. Access is
+  controlled by the rules, not by hiding the config.
 
-```bash
-npm install -g firebase-tools
-firebase login
-firebase use --add
-firebase deploy
-```
+## Rebuilding from scratch (reference)
 
-The app will be served from `https://<project-id>.web.app/`.
+Only needed if the Firebase project is ever deleted.
 
-## How sync works
-
-- Every product add/edit/delete, sale, and change-log entry is written to
-  IndexedDB first, then queued for Firestore.
-- Firestore's persistent cache keeps the app usable offline. Pending writes are
-  sent automatically when the connection returns.
-- `outbox` in IndexedDB holds writes that could not be handed to Firestore yet
-  (for example when the Firebase SDK could not load). It is flushed at startup.
-- On the very first connection, local products/sales/changes are uploaded to an
-  empty cloud store so existing shop data is not lost.
-- Opening the app on another device shows the same products, sales and changes
-  in real time.
+1. Create a project at https://console.firebase.google.com/.
+2. **Build → Firestore Database → Create database**.
+   Choose a permanent location (for Myanmar, `asia-southeast1`).
+3. **Project settings → Your apps → Web `</>`**, register the app, and copy the
+   `firebaseConfig` values into `firebase-config.js`.
+4. Publish the rules with `firebase deploy --only firestore:rules`.
+5. Deploy with `firebase deploy --only hosting`.
+6. Commit and push to `main` for the GitHub Pages copy.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 | --- | --- |
-| Dot stays grey / "Local only" | The config in `firebase-config.js` still contains `PASTE_...` or is invalid. |
-| Dot is red / "Sync blocked by Firestore rules" | Publish `firestore.rules` (step 5), then reload. |
-| "Firebase sync error" | Check the internet connection; local data is safe. Reload to reconnect. |
-| Image search or barcode scan fails | Those libraries load from a CDN, so the first use needs a connection. |
-| Data appears twice | Export a backup, clear the site data, then import the backup. |
+| Dot stays grey / "Local only" | `firebase-config.js` is missing or invalid. |
+| Dot is red / "Sync blocked by Firestore rules" | Run `firebase deploy --only firestore:rules`, then reload. |
+| "Firebase sync error" | Check the connection; local data is safe. Reload to reconnect. |
+| GitHub Pages shows an old version | Wait for the Pages build, then hard-reload. The service worker may serve a cached copy until `CACHE` is bumped. |
+| Firebase Hosting URL times out | Use the GitHub Pages URL instead. |
+| Barcode scan or image search fails | Those libraries load from a CDN, so the first use needs a connection. |
+| Data appears twice | Export a backup, clear site data, then import the backup. |
 
 ## Free tier
 
-Spark plan: 50,000 reads/day, 20,000 writes/day, 1 GB stored. More than enough
-for a small shop. There are no automatic charges on the Spark plan.
+Firestore Spark plan: 50,000 reads/day, 20,000 writes/day, 1 GB stored. More
+than enough for a small shop. There are no automatic charges on Spark.
