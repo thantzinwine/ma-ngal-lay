@@ -48,6 +48,31 @@ No further Firebase console work is required.
   connection returns.
 - Use **Settings → Backup & Restore** for a JSON backup before big changes.
 
+## Owner controls and history removal
+
+Owner-only history actions live in **Settings → Owner access**:
+
+1. Set a 4–12 digit owner PIN on the shop device.
+2. Unlock owner mode with that PIN. It locks again after 10 minutes of
+   inactivity, and always locks when the app reloads.
+3. In **History → Sales**, an unlocked owner sees a 🗑️ button on each sale.
+   Removing a sale also adds the sold quantities back to tracked stock and
+   writes an audit entry to the change log.
+4. **Clear all sales history** removes every sale without restoring stock.
+   **Clear change log** removes old audit entries and leaves one entry recording
+   the clear.
+
+Removals sync to every device through Firestore, so they cannot be undone
+without a backup. Export a backup first.
+
+The PIN is stored only on the device where it was set (PBKDF2-SHA256 hash in
+local storage), not in Firestore. Set it separately on each device the owner
+uses. It is a UI gate for staff, not cryptographic access control: the
+Firestore rules are still open, and someone with developer tools can bypass the
+PIN. For real access control, add Firebase Authentication and require
+`request.auth != null` in the rules. If the PIN is forgotten, clear the site's
+local data (after exporting a backup) to reset it, then let Firestore re-sync.
+
 ## Updating the app
 
 GitHub Pages (primary host) rebuilds automatically from `main`:

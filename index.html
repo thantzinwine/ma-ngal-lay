@@ -91,6 +91,7 @@
         <button data-htab="sales" class="active">💰 Sales</button>
         <button data-htab="changes">📝 Changes</button>
       </div>
+      <p class="owner-hint" id="ownerHint">🔒 Owner controls are locked. Set a PIN in Settings to remove history.</p>
       <div id="history-sales">
         <div class="rev-grid">
           <div class="rev-card"><span>Today</span><strong id="revToday">0 K</strong></div>
@@ -114,6 +115,21 @@
         <h2>Cloud sync</h2>
         <p class="about" id="syncStatusText">Local only — data stays on this device.</p>
         <p class="about sync-project" id="syncProjectText">No Firebase project configured. Add firebase-config.js to sync across devices.</p>
+        <h2>Owner access</h2>
+        <p class="about" id="ownerStatusText">No owner PIN is set. Set one to enable owner-only history removal.</p>
+        <div class="owner-actions">
+          <button id="ownerSetPinBtn" class="btn block">Set owner PIN</button>
+          <button id="ownerUnlockBtn" class="btn block" hidden>Unlock owner mode</button>
+          <button id="ownerLockBtn" class="btn block" hidden>Lock owner mode</button>
+          <button id="ownerChangePinBtn" class="btn block" hidden>Change owner PIN</button>
+          <button id="ownerRemovePinBtn" class="btn block" hidden>Remove owner PIN</button>
+        </div>
+        <div class="owner-danger" id="ownerDangerZone" hidden>
+          <h3 class="section-title">History removal</h3>
+          <p class="about">Owner-only. Changes sync to every device and cannot be undone.</p>
+          <button id="clearSalesBtn" class="btn danger block">Clear all sales history</button>
+          <button id="clearChangesBtn" class="btn danger block">Clear change log</button>
+        </div>
         <h2>Backup &amp; Restore</h2>
         <button id="exportBtn" class="btn block">⬇ Export backup (JSON)</button>
         <button id="importBtn" class="btn block">⬆ Import backup</button>
@@ -194,6 +210,23 @@
         <button id="confirmNo" class="btn">Cancel</button>
         <button id="confirmYes" class="btn danger">Yes</button>
       </div>
+    </div>
+  </div>
+
+  <div class="sheet-backdrop center" id="pinDialog" hidden>
+    <div class="confirm pin-dialog" role="dialog" aria-modal="true" aria-labelledby="pinTitle">
+      <h3 id="pinTitle">Owner access</h3>
+      <p class="about" id="pinMessage">Enter your owner PIN.</p>
+      <form id="pinForm" autocomplete="off">
+        <input type="text" name="username" autocomplete="username" value="owner" hidden>
+        <input id="pinInput" type="password" inputmode="numeric" autocomplete="current-password" maxlength="12" placeholder="PIN" aria-label="Owner PIN">
+        <input id="pinConfirmInput" type="password" inputmode="numeric" autocomplete="new-password" maxlength="12" placeholder="Confirm PIN" aria-label="Confirm owner PIN" hidden>
+        <p class="form-error" id="pinError" hidden></p>
+        <div class="confirm-actions">
+          <button id="pinCancel" class="btn" type="button">Cancel</button>
+          <button id="pinSubmit" class="btn primary" type="button">Unlock</button>
+        </div>
+      </form>
     </div>
   </div>
 

@@ -641,6 +641,12 @@ body.cart-has-items main {
 
 .btn:active { transform: scale(0.97); }
 
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
 .btn.primary {
   background: var(--grad);
   border: none;
@@ -909,6 +915,52 @@ body.cart-has-items main {
   gap: 10px;
 }
 
+/* ---------- Owner PIN ---------- */
+.pin-dialog {
+  max-width: 360px;
+  text-align: left;
+}
+
+.pin-dialog h3 {
+  font-size: 18px;
+  font-weight: 800;
+  margin-bottom: 7px;
+}
+
+.pin-dialog .about {
+  margin-bottom: 12px;
+}
+
+.pin-dialog input {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: 6px;
+  text-align: center;
+  color: var(--text);
+  background: var(--card);
+  outline: none;
+}
+
+.pin-dialog input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.15);
+}
+
+.pin-dialog .form-error {
+  margin: 10px 0 0;
+  text-align: left;
+}
+
+.pin-dialog .confirm-actions {
+  margin-top: 14px;
+}
+
 /* ---------- History ---------- */
 .subtabs {
   display: flex;
@@ -1038,7 +1090,82 @@ body.cart-has-items main {
 
 .log-ic { margin-right: 5px; }
 
+.log-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.log-del {
+  width: 34px;
+  height: 34px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color .15s, transform .12s;
+}
+
+.log-del:hover { border-color: var(--danger); }
+.log-del:active { transform: scale(0.94); }
+
+.owner-hint {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--muted);
+  background: var(--card);
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  padding: 9px 12px;
+  margin: 0 0 12px;
+  line-height: 1.4;
+}
+
+.owner-hint.unlocked {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
 /* ---------- Settings ---------- */
+.owner-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.owner-danger {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--danger-soft);
+  border-radius: 14px;
+  background: var(--danger-soft);
+}
+
+.owner-danger .section-title {
+  margin-top: 0;
+}
+
+.owner-danger .about {
+  margin-bottom: 10px;
+}
+
+.owner-danger .btn.danger {
+  background: var(--card);
+  border: 1px solid var(--danger);
+  margin-bottom: 8px;
+}
+
+.owner-danger .btn.danger:last-child {
+  margin-bottom: 0;
+}
 .settings-card {
   background: var(--card);
   border: 1px solid var(--border);

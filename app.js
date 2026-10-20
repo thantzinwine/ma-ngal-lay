@@ -11,6 +11,9 @@ const META_PREFIX = 'mnl-meta-';
 const DB_NAME = 'ma-ngal-lay-app';
 const DB_VERSION = 1;
 const STORE_NAMES = ['products', 'sales', 'changes', 'outbox'];
+const OWNER_META_KEY = 'ownerAuth';
+const OWNER_ITERATIONS = 150000;
+const OWNER_LOCK_MS = 10 * 60 * 1000;
 
 /* ------------------------------------------------------------------ */
 /* State                                                               */
@@ -29,7 +32,8 @@ const state = {
   historyTab: 'sales',
   editingId: null,
   photoData: '',
-  scanMode: null
+  scanMode: null,
+  ownerUnlocked: false
 };
 
 const sync = {
@@ -58,6 +62,24 @@ let outboxCounter = 0;
 const mirrorQueues = new Map();
 let imageModelPromise = null;
 let toastTimer = null;
+let pinResolver = null;
+let pinMode = 'unlock';
+let pinBusy = false;
+let pinFailures = 0;
+let pinBlockedUntil = 0;
+let ownerLockTimer = null;
+
+// Revenue is aggregated once per sales change, never during rendering.
+const revenue = {
+  dirty: true,
+  byDay: new Map(),
+  sortedDays: [],
+  recentSales: [],
+  allTotal: 0,
+  todayTotal: 0,
+  weekTotal: 0,
+  monthTotal: 0
+};
 
 /* ------------------------------------------------------------------ */
 /* Tiny helpers                                                        */
@@ -355,6 +377,289 @@ function metaSet(key, value) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Owner access (local PIN gate)                                       */
+/* ------------------------------------------------------------------ */
+
+function bytesToBase64(bytes) {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function base64ToBytes(value) {
+  const binary = atob(String(value || ''));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+async function derivePin(pin, salt, iterations) {
+  if (!window.crypto || !window.crypto.subtle) {
+    throw new Error('Owner PIN needs HTTPS or localhost.');
+  }
+  const material = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(pin),
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
+    material,
+    256
+  );
+  return bytesToBase64(new Uint8Array(bits));
+}
+
+function ownerPinSet() {
+  const auth = metaGet(OWNER_META_KEY);
+  return Boolean(auth && auth.hash && auth.salt);
+}
+
+async function setOwnerPin(pin) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const hash = await derivePin(pin, salt, OWNER_ITERATIONS);
+  metaSet(OWNER_META_KEY, {
+    v: 1,
+    salt: bytesToBase64(salt),
+    hash,
+    iterations: OWNER_ITERATIONS,
+    createdAt: nowISO()
+  });
+}
+
+function sameSecret(a, b) {
+  const left = String(a || '');
+  const right = String(b || '');
+  if (!left || left.length !== right.length) return false;
+  let diff = 0;
+  for (let i = 0; i < left.length; i += 1) diff |= left.charCodeAt(i) ^ right.charCodeAt(i);
+  return diff === 0;
+}
+
+async function verifyOwnerPin(pin) {
+  const auth = metaGet(OWNER_META_KEY);
+  if (!auth || !auth.hash || !auth.salt) return false;
+  const hash = await derivePin(pin, base64ToBytes(auth.salt), Number(auth.iterations) || OWNER_ITERATIONS);
+  return sameSecret(hash, auth.hash);
+}
+
+function clearOwnerPin() {
+  try {
+    localStorage.removeItem(META_PREFIX + OWNER_META_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+function askPin(mode) {
+  if (pinResolver) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    pinResolver = resolve;
+    pinMode = mode;
+    pinBusy = false;
+    const hasPin = ownerPinSet();
+
+    $('pinTitle').textContent = mode === 'create'
+      ? (hasPin ? 'Change owner PIN' : 'Set owner PIN')
+      : 'Unlock owner mode';
+    $('pinMessage').textContent = mode === 'create'
+      ? 'Choose a 4–12 digit PIN. It stays on this device and is needed to remove history.'
+      : 'Enter your owner PIN to remove sales history.';
+    $('pinInput').value = '';
+    $('pinConfirmInput').value = '';
+    $('pinConfirmInput').hidden = mode !== 'create';
+    $('pinError').hidden = true;
+    $('pinError').textContent = '';
+    $('pinSubmit').disabled = false;
+    $('pinSubmit').textContent = mode === 'create' ? 'Save PIN' : 'Unlock';
+    showModal('pinDialog');
+    setTimeout(() => $('pinInput').focus(), 60);
+  });
+}
+
+function closePinDialog(result) {
+  if (pinBusy) return;
+  hideModal('pinDialog');
+  const resolve = pinResolver;
+  pinResolver = null;
+  $('pinInput').value = '';
+  $('pinConfirmInput').value = '';
+  if (resolve) resolve(result);
+}
+
+async function submitPinDialog() {
+  if (pinBusy) return;
+  const pin = $('pinInput').value.trim();
+  const showError = (message) => {
+    const node = $('pinError');
+    node.textContent = message;
+    node.hidden = false;
+  };
+  $('pinError').hidden = true;
+
+  if (!/^\d{4,12}$/.test(pin)) {
+    showError('Use 4 to 12 digits.');
+    return;
+  }
+
+  if (pinMode === 'create') {
+    if (pin !== $('pinConfirmInput').value.trim()) {
+      showError('The PINs do not match.');
+      return;
+    }
+    pinBusy = true;
+    $('pinSubmit').disabled = true;
+    $('pinSubmit').textContent = 'Saving…';
+    try {
+      await setOwnerPin(pin);
+      pinBusy = false;
+      hideModal('pinDialog');
+      const resolve = pinResolver;
+      pinResolver = null;
+      if (resolve) resolve(true);
+    } catch (err) {
+      pinBusy = false;
+      $('pinSubmit').disabled = false;
+      $('pinSubmit').textContent = 'Save PIN';
+      showError(err && err.message ? err.message : 'Could not save the PIN.');
+    }
+    return;
+  }
+
+  const now = Date.now();
+  if (now < pinBlockedUntil) {
+    showError(`Too many attempts. Try again in ${Math.ceil((pinBlockedUntil - now) / 1000)}s.`);
+    return;
+  }
+
+  pinBusy = true;
+  $('pinSubmit').disabled = true;
+  $('pinSubmit').textContent = 'Checking…';
+  try {
+    const ok = await verifyOwnerPin(pin);
+    pinBusy = false;
+    $('pinSubmit').disabled = false;
+    $('pinSubmit').textContent = 'Unlock';
+    if (!ok) {
+      pinFailures += 1;
+      if (pinFailures >= 5) {
+        pinFailures = 0;
+        pinBlockedUntil = Date.now() + 30000;
+        showError('Too many attempts. Wait 30 seconds.');
+      } else {
+        const left = 5 - pinFailures;
+        showError(`Wrong PIN. ${left} attempt${left === 1 ? '' : 's'} left.`);
+      }
+      $('pinInput').value = '';
+      $('pinInput').focus();
+      return;
+    }
+    pinFailures = 0;
+    hideModal('pinDialog');
+    const resolve = pinResolver;
+    pinResolver = null;
+    if (resolve) resolve(true);
+  } catch (err) {
+    pinBusy = false;
+    $('pinSubmit').disabled = false;
+    $('pinSubmit').textContent = 'Unlock';
+    showError(err && err.message ? err.message : 'Could not check the PIN.');
+  }
+}
+
+function armOwnerLock() {
+  clearTimeout(ownerLockTimer);
+  if (!state.ownerUnlocked) return;
+  ownerLockTimer = setTimeout(() => {
+    state.ownerUnlocked = false;
+    renderOwnerUI();
+    renderHistoryIfVisible();
+    toast('Owner mode locked');
+  }, OWNER_LOCK_MS);
+}
+
+function requireOwner() {
+  if (!state.ownerUnlocked) {
+    toast('Owner mode is locked — unlock it in Settings');
+    return false;
+  }
+  armOwnerLock();
+  return true;
+}
+
+async function setOwnerPinFlow() {
+  const ok = await askPin('create');
+  if (!ok) return;
+  state.ownerUnlocked = true;
+  armOwnerLock();
+  renderOwnerUI();
+  renderHistoryIfVisible();
+  toast(ownerPinSet() ? 'Owner PIN saved' : 'Owner PIN set');
+}
+
+async function unlockOwnerFlow() {
+  const ok = await askPin('unlock');
+  if (!ok) return;
+  state.ownerUnlocked = true;
+  armOwnerLock();
+  renderOwnerUI();
+  renderHistoryIfVisible();
+  toast('Owner mode unlocked');
+}
+
+function lockOwnerFlow() {
+  state.ownerUnlocked = false;
+  clearTimeout(ownerLockTimer);
+  renderOwnerUI();
+  renderHistoryIfVisible();
+  toast('Owner mode locked');
+}
+
+async function removeOwnerPinFlow() {
+  if (!requireOwner()) return;
+  const ok = await askConfirm('Remove the owner PIN? Anyone using this device will be able to remove sales history.');
+  if (!ok) return;
+  clearOwnerPin();
+  state.ownerUnlocked = false;
+  clearTimeout(ownerLockTimer);
+  renderOwnerUI();
+  renderHistoryIfVisible();
+  toast('Owner PIN removed');
+}
+
+function renderOwnerUI() {
+  const setButton = $('ownerSetPinBtn');
+  if (!setButton) return;
+  const hasPin = ownerPinSet();
+  const unlocked = state.ownerUnlocked;
+
+  setButton.hidden = hasPin;
+  $('ownerUnlockBtn').hidden = !hasPin || unlocked;
+  $('ownerLockBtn').hidden = !unlocked;
+  $('ownerChangePinBtn').hidden = !hasPin || !unlocked;
+  $('ownerRemovePinBtn').hidden = !hasPin || !unlocked;
+  $('ownerDangerZone').hidden = !unlocked;
+
+  $('ownerStatusText').textContent = !hasPin
+    ? 'No owner PIN is set. Set one to enable owner-only history removal.'
+    : unlocked
+      ? 'Owner mode is unlocked on this device. It locks automatically after 10 minutes of inactivity.'
+      : 'Owner mode is locked. Unlock it with your PIN to remove history.';
+
+  const hint = $('ownerHint');
+  if (hint) {
+    hint.textContent = !hasPin
+      ? '🔒 Owner controls are locked. Set a PIN in Settings to remove history.'
+      : unlocked
+        ? '🔓 Owner mode is on. Use the 🗑️ button on a sale to remove it.'
+        : '🔒 Owner mode is locked. Unlock it in Settings to remove history.';
+    hint.classList.toggle('unlocked', unlocked);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Data normalization                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -570,7 +875,7 @@ async function addChange(type, name, detail, extra = {}) {
     createdAt: nowISO()
   };
   if (Number.isFinite(Number(extra.amount))) change.amount = Number(extra.amount);
-  state.changes.push(change);
+  state.changes.unshift(change);
   await persistRecord('changes', change);
   return change;
 }
@@ -598,6 +903,11 @@ async function flushOutbox() {
     for (const entry of entries) {
       if (!entry || !entry.collection || !entry.docId) {
         if (entry && entry.id) await storeDelete('outbox', entry.id);
+        continue;
+      }
+      if (entry.op === 'clear') {
+        await deleteCloudCollection(entry.collection);
+        await storeDelete('outbox', entry.id);
         continue;
       }
       const docRef = sync.fs.doc(sync.db, entry.collection, entry.docId);
@@ -728,6 +1038,7 @@ function handleSnapshot(name, snapshot) {
   }
 
   state[name] = normalizeCollection(name, next);
+  if (name === 'sales') invalidateRevenue();
   mirrorStore(name, state[name]);
   renderForCollection(name);
   updateSyncFromMeta();
@@ -750,7 +1061,7 @@ function renderForCollection(name) {
     renderPOS();
     renderCart();
     renderInvValue();
-  } else {
+  } else if (state.screen === 'history') {
     renderHistory();
   }
 }
@@ -859,6 +1170,27 @@ async function replaceCloudData() {
   } finally {
     sync.importing = false;
   }
+}
+
+async function deleteCloudCollection(name) {
+  if (!sync.ready || !sync.fs || !sync.db) throw new Error('Firebase is not ready');
+  if (!navigator.onLine) throw new Error('Offline');
+  const snapshot = await sync.fs.getDocs(sync.fs.collection(sync.db, name));
+  const ids = snapshot.docs.map((doc) => doc.id);
+  for (let i = 0; i < ids.length; i += 400) {
+    const batch = sync.fs.writeBatch(sync.db);
+    for (const id of ids.slice(i, i + 400)) {
+      batch.delete(sync.fs.doc(sync.db, name, id));
+    }
+    await batch.commit();
+  }
+}
+
+async function clearCollection(name) {
+  state[name] = [];
+  await storeReplace(name, []);
+  await enqueueOutbox(name, '*', 'clear', null);
+  scheduleFlush();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1134,15 +1466,70 @@ function renderCategoryDatalist() {
   }));
 }
 
-function sumSalesSince(date) {
-  const from = date.getTime();
-  return state.sales.reduce((sum, sale) => {
-    const t = timeValue(sale.createdAt);
-    return t >= from ? sum + sale.total : sum;
-  }, 0);
+function invalidateRevenue() {
+  revenue.dirty = true;
 }
 
-function makeLogCard(title, subtitle, rightText, rightClass = '') {
+function getRevenue() {
+  if (revenue.dirty) rebuildRevenue();
+  return revenue;
+}
+
+// Single pass over sales. All totals and the daily buckets are produced here
+// once; rendering only reads the cached values.
+function rebuildRevenue() {
+  const now = new Date();
+  const todayStart = startOfDay(now).getTime();
+  const weekStart = startOfWeek(now).getTime();
+  const monthStart = startOfMonth(now).getTime();
+  const byDay = new Map();
+  let allTotal = 0;
+  let todayTotal = 0;
+  let weekTotal = 0;
+  let monthTotal = 0;
+
+  for (const sale of state.sales) {
+    const ts = timeValue(sale.createdAt);
+    if (!ts) continue;
+    const total = Number(sale.total);
+    if (!Number.isFinite(total)) continue;
+
+    allTotal += total;
+    if (ts >= monthStart) {
+      monthTotal += total;
+      if (ts >= weekStart) {
+        weekTotal += total;
+        if (ts >= todayStart) todayTotal += total;
+      }
+    }
+
+    const key = dayKey(new Date(ts));
+    const count = Number(sale.count) || 0;
+    const entry = byDay.get(key);
+    if (entry) {
+      entry.total += total;
+      entry.count += count;
+    } else {
+      byDay.set(key, { total, count, ts });
+    }
+  }
+
+  revenue.byDay = byDay;
+  revenue.sortedDays = [...byDay.entries()].sort((a, b) => b[0].localeCompare(a[0]));
+  // state.sales is kept newest-first by normalizeCollection/unshift.
+  revenue.recentSales = state.sales.slice(0, 100);
+  revenue.allTotal = allTotal;
+  revenue.todayTotal = todayTotal;
+  revenue.weekTotal = weekTotal;
+  revenue.monthTotal = monthTotal;
+  revenue.dirty = false;
+}
+
+function renderHistoryIfVisible() {
+  if (state.screen === 'history') renderHistory();
+}
+
+function makeLogCard(title, subtitle, rightText, rightClass = '', action = null) {
   const card = document.createElement('div');
   card.className = 'log-card';
 
@@ -1160,28 +1547,39 @@ function makeLogCard(title, subtitle, rightText, rightClass = '') {
   right.className = `amt${rightClass ? ` ${rightClass}` : ''}`;
   right.textContent = rightText;
 
-  card.append(left, right);
+  const rightWrap = document.createElement('div');
+  rightWrap.className = 'log-right';
+  rightWrap.append(right);
+
+  if (action) {
+    const button = createButton(action.label || '🗑️', 'log-del', action.title || 'Remove');
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      action.onClick();
+    });
+    rightWrap.append(button);
+  }
+
+  card.append(left, rightWrap);
   return card;
 }
 
-function renderHistory() {
-  const now = new Date();
-  $('revToday').textContent = money(sumSalesSince(startOfDay(now)));
-  $('revWeek').textContent = money(sumSalesSince(startOfWeek(now)));
-  $('revMonth').textContent = money(sumSalesSince(startOfMonth(now)));
-  $('revAll').textContent = money(state.sales.reduce((sum, sale) => sum + sale.total, 0));
+function saleItemSummary(sale) {
+  const items = Array.isArray(sale.items) ? sale.items : [];
+  if (!items.length) return `${Number(sale.count) || 0} item${Number(sale.count) === 1 ? '' : 's'}`;
+  const names = items.slice(0, 4).map((item) => `${item.qty}× ${item.name}`);
+  if (items.length > 4) names.push(`+${items.length - 4} more`);
+  return names.join(', ');
+}
 
-  const days = new Map();
-  for (const sale of state.sales) {
-    const date = new Date(sale.createdAt);
-    if (Number.isNaN(date.getTime())) continue;
-    const key = dayKey(date);
-    const entry = days.get(key) || { total: 0, count: 0 };
-    entry.total += sale.total;
-    entry.count += sale.count || 0;
-    days.set(key, entry);
-  }
-  const daily = [...days.entries()].sort((a, b) => b[0].localeCompare(a[0])).slice(0, 14);
+function renderHistory() {
+  const summary = getRevenue();
+  $('revToday').textContent = money(summary.todayTotal);
+  $('revWeek').textContent = money(summary.weekTotal);
+  $('revMonth').textContent = money(summary.monthTotal);
+  $('revAll').textContent = money(summary.allTotal);
+
+  const daily = summary.sortedDays.slice(0, 14);
   $('dailyList').replaceChildren(...(daily.length
     ? daily.map(([key, entry]) => makeLogCard(
       formatDay(key),
@@ -1191,18 +1589,31 @@ function renderHistory() {
     : [makeLogCard('No sales yet', 'Revenue will appear here after the first sale.', '')]
   ));
 
-  const sales = state.sales.slice().sort((a, b) => timeValue(b.createdAt) - timeValue(a.createdAt)).slice(0, 100);
+  const sales = summary.recentSales;
   $('salesList').replaceChildren(...(sales.length
     ? sales.map((sale) => {
-      const itemNames = sale.items.map((item) => `${item.qty}× ${item.name}`).join(', ');
-      const title = `${sale.count || sale.items.reduce((sum, item) => sum + item.qty, 0)} item${(sale.count || 0) === 1 ? '' : 's'}`;
-      return makeLogCard(title, `${formatDateTime(sale.createdAt)}${itemNames ? ` · ${itemNames}` : ''}`, money(sale.total));
+      const itemNames = saleItemSummary(sale);
+      const count = Number(sale.count) || 0;
+      const title = `${count} item${count === 1 ? '' : 's'}`;
+      return makeLogCard(
+        title,
+        `${formatDateTime(sale.createdAt)}${itemNames ? ` · ${itemNames}` : ''}`,
+        money(sale.total),
+        '',
+        state.ownerUnlocked
+          ? {
+            label: '🗑️',
+            title: `Remove this sale of ${money(sale.total)}`,
+            onClick: () => deleteSaleRecord(sale)
+          }
+          : null
+      );
     })
     : [makeLogCard('No sales yet', 'Complete a sale from the Bill tab.', '')]
   ));
 
-  const changes = state.changes.slice().sort((a, b) => timeValue(b.createdAt) - timeValue(a.createdAt)).slice(0, 100);
-  const icons = { add: '➕', edit: '✏️', delete: '🗑️', sale: '💰', import: '⬆️' };
+  const changes = state.changes.slice(0, 100);
+  const icons = { add: '➕', edit: '✏️', delete: '🗑️', void: '↩️', sale: '💰', import: '⬆️' };
   $('changesList').replaceChildren(...(changes.length
     ? changes.map((change) => makeLogCard(
       `${icons[change.type] || '•'} ${change.name}`,
@@ -1214,13 +1625,95 @@ function renderHistory() {
   ));
 }
 
+async function deleteSaleRecord(sale) {
+  if (!requireOwner()) return;
+  if (!sale || !state.sales.some((row) => row.id === sale.id)) return;
+
+  const ok = await askConfirm(
+    `Remove this sale of ${money(sale.total)}? Stock will be added back for tracked products. This syncs to all devices.`
+  );
+  if (!ok) return;
+
+  state.sales = state.sales.filter((row) => row.id !== sale.id);
+  invalidateRevenue();
+  await persistDelete('sales', sale.id);
+
+  const restored = [];
+  for (const item of sale.items || []) {
+    const product = state.products.find((row) => row.id === item.productId);
+    if (!product || product.stock === null) continue;
+    const current = Number(product.stock);
+    if (!Number.isFinite(current)) continue;
+    product.stock = Math.max(0, Math.round(current + item.qty));
+    product.updatedAt = nowISO();
+    await persistRecord('products', product);
+    restored.push(product.name);
+  }
+
+  await addChange(
+    'void',
+    'Sale removed',
+    `${formatDateTime(sale.createdAt)} · ${saleItemSummary(sale)}${restored.length ? ' · stock restored' : ''}`,
+    { amount: sale.total }
+  );
+  scheduleFlush();
+  renderAll();
+  toast(restored.length ? 'Sale removed · stock restored' : 'Sale removed');
+}
+
+async function clearSalesHistory() {
+  if (!requireOwner()) return;
+  const count = state.sales.length;
+  if (!count) {
+    toast('There is no sales history to clear');
+    return;
+  }
+  const total = getRevenue().allTotal;
+  const ok = await askConfirm(
+    `Delete all ${count} sales? Revenue resets to zero. Stock is NOT restored. This syncs to all devices and cannot be undone.`
+  );
+  if (!ok) return;
+
+  await clearCollection('sales');
+  invalidateRevenue();
+  await addChange(
+    'void',
+    'Sales history cleared',
+    `${count} sale${count === 1 ? '' : 's'} removed · ${money(total)}`,
+    { amount: total }
+  );
+  scheduleFlush();
+  renderAll();
+  toast(`Sales history cleared · ${count} sale${count === 1 ? '' : 's'}`);
+}
+
+async function clearChangeLog() {
+  if (!requireOwner()) return;
+  const count = state.changes.length;
+  if (!count) {
+    toast('The change log is already empty');
+    return;
+  }
+  const ok = await askConfirm(
+    `Delete all ${count} change-log entries? One audit entry will remain to record the clear. This syncs to all devices.`
+  );
+  if (!ok) return;
+
+  await clearCollection('changes');
+  await addChange('delete', 'Change log cleared', `${count} entr${count === 1 ? 'y' : 'ies'} removed`);
+  scheduleFlush();
+  renderAll();
+  toast('Change log cleared');
+}
+
 function renderAll() {
   renderCategoryDatalist();
   renderProducts();
   renderPOS();
   renderCart();
-  renderHistory();
+  if (state.screen === 'history') renderHistory();
   renderInvValue();
+  renderOwnerUI();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1400,7 +1893,6 @@ async function saveProductFromForm() {
     if (state.filterCat !== 'all' && state.filterCat !== product.category) state.filterCat = 'all';
     closeProductSheet();
     renderForCollection('products');
-    renderHistory();
     toast(existing ? 'Product updated' : 'Product added');
   } catch (err) {
     console.error(err);
@@ -1456,7 +1948,8 @@ async function checkout() {
   button.textContent = 'Saving…';
 
   try {
-    state.sales.push(sale);
+    state.sales.unshift(sale);
+    invalidateRevenue();
     await persistRecord('sales', sale);
 
     const updatedProducts = [];
@@ -1538,6 +2031,7 @@ async function importBackupFile(file) {
   state.products = products;
   state.sales = sales;
   state.changes = changes;
+  invalidateRevenue();
   state.cart.clear();
   state.search = '';
   state.cartSearch = '';
@@ -1562,7 +2056,7 @@ async function importBackupFile(file) {
     detail: `${products.length} products · ${sales.length} sales`,
     createdAt: nowISO()
   };
-  state.changes.push(importChange);
+  state.changes.unshift(importChange);
   await persistRecord('changes', importChange);
 
   if (sync.ready) {
@@ -1809,7 +2303,9 @@ function switchTab(tab) {
   if (tab === 'products') renderProducts();
   if (tab === 'cart') renderPOS();
   renderCart();
-  window.scrollTo({ top: 0, behavior: 'smooth' });}
+  renderOwnerUI();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
 
 /* ------------------------------------------------------------------ */
 /* Event wiring                                                        */
@@ -1886,6 +2382,32 @@ function bindEvents() {
   $('confirmNo').addEventListener('click', () => closeConfirm(false));
   $('confirmYes').addEventListener('click', () => closeConfirm(true));
 
+  $('ownerSetPinBtn').addEventListener('click', setOwnerPinFlow);
+  $('ownerUnlockBtn').addEventListener('click', unlockOwnerFlow);
+  $('ownerLockBtn').addEventListener('click', lockOwnerFlow);
+  $('ownerChangePinBtn').addEventListener('click', setOwnerPinFlow);
+  $('ownerRemovePinBtn').addEventListener('click', removeOwnerPinFlow);
+  $('clearSalesBtn').addEventListener('click', clearSalesHistory);
+  $('clearChangesBtn').addEventListener('click', clearChangeLog);
+  $('pinSubmit').addEventListener('click', submitPinDialog);
+  $('pinCancel').addEventListener('click', () => closePinDialog(null));
+  $('pinForm').addEventListener('submit', (event) => {
+    event.preventDefault();
+    submitPinDialog();
+  });
+
+  for (const input of [$('pinInput'), $('pinConfirmInput')]) {
+    input.addEventListener('input', () => {
+      input.value = input.value.replace(/\D/g, '').slice(0, 12);
+    });
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        submitPinDialog();
+      }
+    });
+  }
+
   for (const tabButton of document.querySelectorAll('[data-htab]')) {
     tabButton.addEventListener('click', () => {
       state.historyTab = tabButton.dataset.htab;
@@ -1917,6 +2439,9 @@ function bindEvents() {
   $('confirmDialog').addEventListener('click', (event) => {
     if (event.target === $('confirmDialog')) closeConfirm(false);
   });
+  $('pinDialog').addEventListener('click', (event) => {
+    if (event.target === $('pinDialog')) closePinDialog(null);
+  });
   $('scanModal').addEventListener('click', (event) => {
     if (event.target === $('scanModal')) closeScanner();
   });
@@ -1926,7 +2451,8 @@ function bindEvents() {
 
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
-    if (!$('confirmDialog').hidden) closeConfirm(false);
+    if (!$('pinDialog').hidden) closePinDialog(null);
+    else if (!$('confirmDialog').hidden) closeConfirm(false);
     else if (!$('scanModal').hidden) closeScanner();
     else if (!$('imageSearchModal').hidden) closeImageSearch();
     else if (!$('productSheet').hidden) closeProductSheet();
