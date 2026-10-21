@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#16a34a">
+  <meta name="description" content="Ma Ngal Lay mini mart — browse products and prices, and verify a purchase voucher.">
+  <title>Ma Ngal Lay · Products &amp; Vouchers</title>
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="fonts/fonts.css">
+  <link rel="stylesheet" href="shop.css">
+  <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+</head>
+<body>
+  <header class="shop-top">
+    <div class="shop-brand">
+      <span class="brand-mark"><img src="image.png" alt="Ma Ngal Lay logo"></span>
+      <div class="brand-text">
+        <p class="eyebrow">Mini mart</p>
+        <h1>Ma Ngal Lay</h1>
+      </div>
+    </div>
+    <button class="verify-open" id="openVerifyBtn" type="button">🔎 Verify voucher</button>
+  </header>
+
+  <main class="shop-main">
+    <section class="catalog-head">
+      <div class="catalog-title">
+        <p class="eyebrow">Product catalog</p>
+        <h2>What we have in store</h2>
+        <p class="muted">Prices are in MMK. Ask at the counter for today's availability.</p>
+      </div>
+      <div class="shop-search">
+        <input id="catalogSearch" type="search" placeholder="Search products…" autocomplete="off" aria-label="Search products">
+        <button id="catalogClear" type="button" hidden aria-label="Clear search">✕</button>
+      </div>
+    </section>
+
+    <div class="chips" id="categoryChips" role="tablist" aria-label="Product categories"></div>
+
+    <p class="catalog-status" id="catalogStatus">Loading products…</p>
+    <div class="catalog-grid" id="catalogGrid"></div>
+    <div class="catalog-empty" id="catalogEmpty" hidden>
+      <div class="empty-ic">🛒</div>
+      <p>No products match your search.</p>
+    </div>
+  </main>
+
+  <footer class="shop-foot">
+    <span class="brand-mark small"><img src="image.png" alt=""></span>
+    <p><strong>Ma Ngal Lay</strong> · Mini mart · Prices in MMK</p>
+  </footer>
+
+  <div class="modal-backdrop" id="verifyModal" hidden>
+    <div class="verify-card" role="dialog" aria-modal="true" aria-labelledby="verifyTitle">
+      <header class="verify-head">
+        <div>
+          <p class="eyebrow">Purchase voucher</p>
+          <h2 id="verifyTitle">Verify a voucher</h2>
+        </div>
+        <button class="modal-close" id="closeVerifyBtn" type="button" aria-label="Close">✕</button>
+      </header>
+
+      <form id="verifyForm" autocomplete="off">
+        <label class="field">Voucher code
+          <input id="voucherInput" type="text" placeholder="MNL-XXXXXX-XXXX-XXXX-XXXX-XXXX" autocomplete="off" required>
+        </label>
+        <p class="form-error" id="verifyError" hidden></p>
+        <button class="btn primary block" id="verifySubmit" type="submit">Verify voucher</button>
+      </form>
+
+      <div class="verify-result" id="verifyResult" hidden>
+        <div class="result-head">
+          <span class="result-badge">✓ Valid voucher</span>
+          <span class="result-code" id="resultCode"></span>
+        </div>
+        <p class="result-meta" id="resultMeta"></p>
+        <div class="result-lines" id="resultLines"></div>
+        <div class="result-total">
+          <span>TOTAL</span>
+          <strong id="resultTotal">0 K</strong>
+        </div>
+        <p class="result-note">This voucher matches a purchase recorded by Ma Ngal Lay.</p>
+      </div>
+    </div>
+  </div>
+
+  <script src="firebase-config.js"></script>
+  <script type="module" src="public.js"></script>
+</body>
+</html>

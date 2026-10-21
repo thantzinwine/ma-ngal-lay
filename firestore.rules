@@ -1,18 +1,46 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Ma Ngal Lay is a small, trusted-shop shared store. The web config is
-    // public, so anyone with the URL can read/write these three collections.
-    // Do not put sensitive data in this project.
+    // The shop manager (products, sales, changes) is readable and writable
+    // only by the signed-in owner account. The owner account has the custom
+    // claim { owner: true }, set once with the Firebase Admin API.
+    function isOwner() {
+      return request.auth != null && request.auth.token.owner == true;
+    }
+
     match /products/{productId} {
-      allow read, write: if true;
+      allow read, write: if isOwner();
     }
+
     match /sales/{saleId} {
-      allow read, write: if true;
+      allow read, write: if isOwner();
     }
+
     match /changes/{changeId} {
-      allow read, write: if true;
+      allow read, write: if isOwner();
     }
+
+    // Customer-safe catalog: names, categories, prices and availability only.
+    // Stock quantities are never written to this collection.
+    match /catalog/{productId} {
+      allow read: if true;
+      allow write: if isOwner();
+    }
+
+    // One document per voucher code. Anyone with the code may fetch that one
+    // voucher; only the owner can list the collection or see other vouchers.
+    match /vouchers/{voucherCode} {
+      allow get: if true;
+      allow list: if isOwner();
+      allow write: if isOwner();
+    }
+
+    // Owner-only marker used to backfill the public collections once.
+    match /publicMeta/{docId} {
+      allow read, write: if isOwner();
+    }
+
+    // Nothing else is public.
     match /{document=**} {
       allow read, write: if false;
     }

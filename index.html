@@ -16,10 +16,32 @@
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.1/dist/mobilenet.min.js" defer></script>
 </head>
-<body>
+<body class="auth-locked">
+  <div class="auth-screen" id="authScreen">
+    <div class="auth-card">
+      <span class="auth-logo"><img src="image.png" alt="Ma Ngal Lay logo"></span>
+      <p class="auth-eyebrow">Owner access</p>
+      <h1>Ma Ngal Lay</h1>
+      <p class="auth-sub">Sign in to open the shop manager.</p>
+      <form id="loginForm" autocomplete="on">
+        <label class="field">Email
+          <input id="loginEmail" type="email" autocomplete="username" required placeholder="owner@example.com">
+        </label>
+        <label class="field">Password
+          <input id="loginPassword" type="password" autocomplete="current-password" required placeholder="Your password">
+        </label>
+        <p class="form-error" id="loginError" hidden></p>
+        <button id="loginSubmit" class="btn primary big block" type="submit">Sign in</button>
+        <button id="forgotPasswordBtn" class="btn block" type="button">Forgot password?</button>
+      </form>
+      <p class="auth-note">Customers can view the catalog and verify a voucher on the
+        <a href="shop.html">public shop page</a>.</p>
+    </div>
+  </div>
+
   <header class="topbar">
     <div class="brand">
-      <span class="logo">မ</span>
+      <span class="logo logo-image"><img src="image.png" alt=""></span>
       <h1>Ma Ngal Lay</h1>
     </div>
     <div class="topbar-right">
@@ -118,11 +140,17 @@
 
     <section id="screen-settings" class="screen">
       <div class="settings-card">
+        <h2>Owner account</h2>
+        <p class="about" id="accountStatusText">Not signed in.</p>
+        <div class="owner-actions">
+          <button id="changePasswordBtn" class="btn block">Change password</button>
+          <button id="signOutBtn" class="btn block">Sign out</button>
+        </div>
         <h2>Cloud sync</h2>
         <p class="about" id="syncStatusText">Local only — data stays on this device.</p>
         <p class="about sync-project" id="syncProjectText">No Firebase project configured. Add firebase-config.js to sync across devices.</p>
-        <h2>Owner access</h2>
-        <p class="about" id="ownerStatusText">No owner PIN is set. Set one to enable owner-only history removal.</p>
+        <h2>Owner PIN (extra local lock)</h2>
+        <p class="about" id="ownerStatusText">No owner PIN is set. Set one to protect history removal on this device.</p>
         <div class="owner-actions">
           <button id="ownerSetPinBtn" class="btn block">Set owner PIN</button>
           <button id="ownerUnlockBtn" class="btn block" hidden>Unlock owner mode</button>
@@ -286,6 +314,29 @@
         <div class="confirm-actions">
           <button id="pinCancel" class="btn" type="button">Cancel</button>
           <button id="pinSubmit" class="btn primary" type="button">Unlock</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="sheet-backdrop center" id="passwordDialog" hidden>
+    <div class="confirm password-dialog" role="dialog" aria-modal="true" aria-labelledby="passwordTitle">
+      <h3 id="passwordTitle">Change owner password</h3>
+      <p class="about">Use at least 8 characters. You will stay signed in.</p>
+      <form id="passwordForm" autocomplete="off">
+        <label class="field">Current password
+          <input id="currentPassword" type="password" autocomplete="current-password" required>
+        </label>
+        <label class="field">New password
+          <input id="newPassword" type="password" autocomplete="new-password" required minlength="8">
+        </label>
+        <label class="field">Confirm new password
+          <input id="confirmPassword" type="password" autocomplete="new-password" required minlength="8">
+        </label>
+        <p class="form-error" id="passwordError" hidden></p>
+        <div class="confirm-actions">
+          <button id="passwordCancel" class="btn" type="button">Cancel</button>
+          <button id="passwordSubmit" class="btn primary" type="submit">Update password</button>
         </div>
       </form>
     </div>

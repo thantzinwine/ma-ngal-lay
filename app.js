@@ -17,6 +17,10 @@ const OWNER_LOCK_MS = 10 * 60 * 1000;
 const VOUCHER_KEY_META = 'voucherHmacKey';
 const VOUCHER_KEY_ID_META = 'voucherHmacKeyId';
 const VOUCHER_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const PUBLIC_CATALOG = 'catalog';
+const PUBLIC_VOUCHERS = 'vouchers';
+const PUBLIC_META_VERSION = 1;
+const OWNER_EMAIL_HINT = 'mnl-owner-email';
 
 /* ------------------------------------------------------------------ */
 /* State                                                               */
@@ -36,7 +40,9 @@ const state = {
   editingId: null,
   photoData: '',
   scanMode: null,
-  ownerUnlocked: false
+  ownerUnlocked: false,
+  authUser: null,
+  firebaseApp: null
 };
 
 const sync = {
@@ -52,7 +58,11 @@ const sync = {
   announced: false,
   errorShown: false,
   fs: null,
-  db: null
+  db: null,
+  auth: null,
+  authModule: null,
+  unsubs: [],
+  publicDataChecked: false
 };
 
 let started = false;
@@ -1097,6 +1107,11 @@ function handleSnapshot(name, snapshot) {
   if (name === 'sales') invalidateRevenue();
   mirrorStore(name, state[name]);
   renderForCollection(name);
+  if (!snapshot.metadata.fromCache) queuePublicDataDiff(name, local, state[name]);
+  if (firstServer && sync.serverSnapshots.size >= 3 && !sync.publicDataChecked) {
+    sync.publicDataChecked = true;
+    ensurePublicDataVersion().catch((err) => console.warn('[public] could not publish public data', err));
+  }
   updateSyncFromMeta();
 }
 
@@ -1123,10 +1138,560 @@ function renderForCollection(name) {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Public (customer-safe) data                                         */
+/* ------------------------------------------------------------------ */
+
+// The catalog collection never contains stock quantities or stock value.
+function buildPublicCatalogRecord(product) {
+  const photo = typeof product.photo === 'string' && product.photo.length <= 150000
+    ? product.photo
+    : '';
+  return {
+    name: String(product.name || ''),
+    category: String(product.category || 'Uncategorized'),
+    price: Number(product.price) || 0,
+    photo,
+    available: product.stock === null ? true : Number(product.stock) > 0,
+    updatedAt: nowISO()
+  };
+}
+
+function catalogSignature(product) {
+  if (!product) return '';
+  const availability = product.stock === null ? 'u' : (Number(product.stock) > 0 ? '1' : '0');
+  return [
+    product.name || '',
+    product.category || '',
+    Number(product.price) || 0,
+    product.photo || '',
+    availability
+  ].join('|');
+}
+
+function buildPublicVoucher(sale) {
+  const code = cleanVoucherCode(sale && sale.voucherCode);
+  if (!code) return null;
+  const record = {
+    code: String(sale.voucherCode || code),
+    createdAt: sale.createdAt || '',
+    total: Number(sale.total) || 0,
+    count: Number(sale.count) || 0,
+    items: (sale.items || []).map((item) => ({
+      name: String(item.name || ''),
+      qty: Number(item.qty) || 0,
+      price: Number(item.price) || 0
+    }))
+  };
+  if (Number.isFinite(Number(sale.paid))) record.paid = Number(sale.paid);
+  if (Number.isFinite(Number(sale.change))) record.change = Number(sale.change);
+  return record;
+}
+
+function publicVoucherSignature(sale) {
+  const record = buildPublicVoucher(sale);
+  return record ? JSON.stringify(record) : '';
+}
+
+function queuePublicDataDiff(name, previous, next) {
+  if (!firebaseConfigured()) return;
+  const jobs = [];
+  if (name === 'products') {
+    const prevMap = new Map(previous.filter(Boolean).map((row) => [row.id, row]));
+    const nextIds = new Set();
+    for (const product of next) {
+      if (!product || !product.id) continue;
+      nextIds.add(product.id);
+      const old = prevMap.get(product.id);
+      if (!old || catalogSignature(old) !== catalogSignature(product)) {
+        jobs.push(enqueueOutbox(PUBLIC_CATALOG, product.id, 'set', buildPublicCatalogRecord(product)).catch(() => {}));
+      }
+    }
+    for (const old of previous) {
+      if (old && old.id && !nextIds.has(old.id)) {
+        jobs.push(enqueueOutbox(PUBLIC_CATALOG, old.id, 'delete', null).catch(() => {}));
+      }
+    }
+  } else if (name === 'sales') {
+    const prevMap = new Map();
+    for (const sale of previous) {
+      const code = cleanVoucherCode(sale && sale.voucherCode);
+      if (code) prevMap.set(code, sale);
+    }
+    const nextCodes = new Set();
+    for (const sale of next) {
+      const code = cleanVoucherCode(sale && sale.voucherCode);
+      if (!code) continue;
+      nextCodes.add(code);
+      const old = prevMap.get(code);
+      if (!old || publicVoucherSignature(old) !== publicVoucherSignature(sale)) {
+        jobs.push(enqueueOutbox(PUBLIC_VOUCHERS, code, 'set', buildPublicVoucher(sale)).catch(() => {}));
+      }
+    }
+    for (const code of prevMap.keys()) {
+      if (!nextCodes.has(code)) {
+        jobs.push(enqueueOutbox(PUBLIC_VOUCHERS, code, 'delete', null).catch(() => {}));
+      }
+    }
+  }
+  if (jobs.length) Promise.all(jobs).then(() => scheduleFlush());
+}
+
+async function enqueuePublicCatalog(product) {
+  if (!product || !product.id || !firebaseConfigured()) return;
+  await enqueueOutbox(PUBLIC_CATALOG, product.id, 'set', buildPublicCatalogRecord(product));
+  scheduleFlush();
+}
+
+async function removePublicCatalog(productId) {
+  if (!productId || !firebaseConfigured()) return;
+  await enqueueOutbox(PUBLIC_CATALOG, productId, 'delete', null);
+  scheduleFlush();
+}
+
+async function enqueuePublicVoucher(sale) {
+  const code = cleanVoucherCode(sale && sale.voucherCode);
+  if (!code || !firebaseConfigured()) return;
+  await enqueueOutbox(PUBLIC_VOUCHERS, code, 'set', buildPublicVoucher(sale));
+  scheduleFlush();
+}
+
+async function removePublicVoucher(code) {
+  const clean = cleanVoucherCode(code);
+  if (!clean || !firebaseConfigured()) return;
+  await enqueueOutbox(PUBLIC_VOUCHERS, clean, 'delete', null);
+  scheduleFlush();
+}
+
+// Rebuild the public collections from the current local state. Used after a
+// backup restore, where many products/sales change at once.
+async function rebuildPublicData() {
+  if (!sync.ready || !sync.fs || !sync.db) return;
+  const fs = sync.fs;
+  const db = sync.db;
+
+  const catalogKeep = new Set(state.products.map((product) => product.id));
+  const catalogExisting = await fs.getDocs(fs.collection(db, PUBLIC_CATALOG));
+  const catalogOps = state.products.map((product) => ({
+    type: 'set',
+    ref: fs.doc(db, PUBLIC_CATALOG, product.id),
+    data: buildPublicCatalogRecord(product)
+  }));
+  for (const doc of catalogExisting.docs) {
+    if (!catalogKeep.has(doc.id)) catalogOps.push({ type: 'delete', ref: doc.ref });
+  }
+  await commitPublicOps(catalogOps);
+
+  const voucherKeep = new Set();
+  const voucherOps = [];
+  for (const sale of state.sales) {
+    const code = cleanVoucherCode(sale.voucherCode);
+    if (!code) continue;
+    voucherKeep.add(code);
+    voucherOps.push({
+      type: 'set',
+      ref: fs.doc(db, PUBLIC_VOUCHERS, code),
+      data: buildPublicVoucher(sale)
+    });
+  }
+  const voucherExisting = await fs.getDocs(fs.collection(db, PUBLIC_VOUCHERS));
+  for (const doc of voucherExisting.docs) {
+    if (!voucherKeep.has(doc.id)) voucherOps.push({ type: 'delete', ref: doc.ref });
+  }
+  await commitPublicOps(voucherOps);
+}
+
+async function commitPublicOps(ops) {
+  if (!ops.length || !sync.ready || !sync.fs || !sync.db) return;
+  for (let i = 0; i < ops.length; i += 400) {
+    const batch = sync.fs.writeBatch(sync.db);
+    for (const op of ops.slice(i, i + 400)) {
+      if (op.type === 'delete') batch.delete(op.ref);
+      else batch.set(op.ref, cloudRecord(op.data));
+    }
+    await batch.commit();
+  }
+}
+
+// Publish a full snapshot of the sanitized collections the first time this
+// device connects after a data-format update. Later changes are written
+// individually so we do not rewrite everything on every login.
+async function ensurePublicDataVersion() {
+  if (!sync.ready || !sync.fs || !sync.db) return;
+  const metaRef = sync.fs.doc(sync.db, 'publicMeta', 'data');
+  try {
+    const snapshot = await sync.fs.getDoc(metaRef);
+    if (snapshot.exists() && Number(snapshot.data().version) >= PUBLIC_META_VERSION) return;
+  } catch (err) {
+    console.warn('[public] could not read the public data version', err);
+  }
+  await rebuildPublicData();
+  await sync.fs.setDoc(metaRef, { version: PUBLIC_META_VERSION, updatedAt: nowISO() });
+}
+
+/* ------------------------------------------------------------------ */
+/* Owner authentication (Firebase email/password)                      */
+/* ------------------------------------------------------------------ */
+
+let ownerAppStarted = false;
+
+function redirectLegacyVoucherLink() {
+  if (!/[#&?]voucher=/i.test(location.hash)) return;
+  if (/(^|\/)(shop|public|catalog)\.html$/i.test(location.pathname)) return;
+  const target = new URL('shop.html', location.href);
+  target.hash = location.hash.replace(/^#/, '');
+  location.replace(target.href);
+}
+
+function authErrorMessage(err) {
+  const code = (err && err.code) || '';
+  if (code === 'auth/invalid-email') return 'Enter a valid email address.';
+  if (code === 'auth/user-disabled') return 'This account has been disabled.';
+  if (code === 'auth/user-not-found' || code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
+    return 'Wrong email or password.';
+  }
+  if (code === 'auth/too-many-requests') return 'Too many attempts. Wait a few minutes and try again.';
+  if (code === 'auth/network-request-failed') return 'Network error. Check your connection and try again.';
+  if (code === 'auth/operation-not-allowed') return 'Email/password sign-in is not enabled for this project.';
+  if (code === 'auth/requires-recent-login') return 'Please sign in again before changing your password.';
+  if (code === 'auth/weak-password') return 'Choose a stronger password (at least 8 characters).';
+  if (code === 'auth/missing-password') return 'Enter your password.';
+  return 'Sign-in failed. Please try again.';
+}
+
+function showLoginError(message, ok = false) {
+  const node = $('loginError');
+  if (!node) return;
+  node.textContent = message || '';
+  node.hidden = !message;
+  node.classList.toggle('ok', Boolean(message) && ok);
+}
+
+function setLoginBusy(busy, label) {
+  const button = $('loginSubmit');
+  if (!button) return;
+  button.disabled = busy;
+  button.textContent = busy ? label || 'Please wait…' : 'Sign in';
+}
+
+async function initAuth() {
+  try {
+    const base = `https://www.gstatic.com/firebasejs/${FB_VERSION}/`;
+    const [appModule, authModule] = await Promise.all([
+      import(`${base}firebase-app.js`),
+      import(`${base}firebase-auth.js`)
+    ]);
+
+    const app = appModule.getApps().length
+      ? appModule.getApp()
+      : appModule.initializeApp(window.FIREBASE_CONFIG);
+    state.firebaseApp = app;
+
+    const auth = authModule.getAuth(app);
+    if (window.FIREBASE_CONFIG && window.FIREBASE_CONFIG.useEmulators) {
+      try {
+        authModule.connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
+      } catch (emulatorError) {
+        console.warn('[auth] could not connect to the Auth emulator', emulatorError);
+      }
+    }
+
+    sync.authModule = authModule;
+    sync.auth = auth;
+    try {
+      await authModule.setPersistence(auth, authModule.browserLocalPersistence);
+    } catch (persistenceError) {
+      console.warn('[auth] session persistence unavailable', persistenceError);
+    }
+
+    const savedEmail = localStorage.getItem(OWNER_EMAIL_HINT);
+    if (savedEmail && !$('loginEmail').value) $('loginEmail').value = savedEmail;
+
+    authModule.onAuthStateChanged(
+      auth,
+      (user) => {
+        handleAuthState(user).catch((err) => {
+          console.warn('[auth] state error', err);
+          showLoginError(authErrorMessage(err));
+        });
+      },
+      (err) => {
+        console.warn('[auth] listener error', err);
+        showLoginError('Login is unavailable right now. Check your connection and reload.');
+      }
+    );
+    updateAccountUI();
+  } catch (err) {
+    console.warn('[auth] could not start', err);
+    showLoginError(navigator.onLine
+      ? 'Could not start the login service. Reload the page and try again.'
+      : 'Connect to the internet once to sign in.');
+  }
+}
+
+async function handleAuthState(user) {
+  if (!user) {
+    state.authUser = null;
+    lockShop();
+    updateAccountUI();
+    return;
+  }
+
+  let isOwner = false;
+  try {
+    let token = await user.getIdTokenResult();
+    isOwner = Boolean(token.claims && token.claims.owner === true);
+    if (!isOwner && navigator.onLine) {
+      token = await user.getIdTokenResult(true);
+      isOwner = Boolean(token.claims && token.claims.owner === true);
+    }
+  } catch (err) {
+    console.warn('[auth] could not read the owner claim', err);
+  }
+
+  if (!isOwner) {
+    try { await sync.authModule.signOut(sync.auth); } catch { /* already signed out */ }
+    state.authUser = null;
+    lockShop();
+    updateAccountUI();
+    showLoginError('This account is not the shop owner. Sign in with the owner email.');
+    return;
+  }
+
+  state.authUser = user;
+  showLoginError('');
+  await unlockOwnerApp(user);
+}
+
+async function unlockOwnerApp(user) {
+  state.authUser = user || null;
+  document.body.classList.remove('auth-locked');
+  updateAccountUI();
+
+  if (!ownerAppStarted) {
+    ownerAppStarted = true;
+    restoreCart();
+    await loadLocalData();
+    pruneCart();
+    renderAll();
+  }
+
+  if (firebaseConfigured() && user) {
+    updateSyncStatus('connecting', 'Starting cloud sync…');
+    initFirebase();
+  } else if (!firebaseConfigured()) {
+    updateSyncStatus('local', 'Local only — data stays on this device.');
+  }
+
+  maybePromptPasswordChange(user);
+}
+
+function lockShop() {
+  document.body.classList.add('auth-locked');
+  for (const unsubscribe of sync.unsubs) {
+    try { unsubscribe(); } catch { /* already detached */ }
+  }
+  sync.unsubs = [];
+  sync.ready = false;
+  sync.initializing = false;
+  sync.serverSnapshots.clear();
+  sync.meta = {};
+  state.authUser = null;
+  state.products = [];
+  state.sales = [];
+  state.changes = [];
+  state.cart.clear();
+  renderAll();
+}
+
+async function loadLocalData() {
+  try {
+    const [products, sales, changes] = await Promise.all([
+      storeAll('products'),
+      storeAll('sales'),
+      storeAll('changes')
+    ]);
+    state.products = normalizeCollection('products', products);
+    state.sales = normalizeCollection('sales', sales);
+    state.changes = normalizeCollection('changes', changes);
+  } catch (err) {
+    console.warn('[local] could not load data', err);
+  }
+}
+
+function updateAccountUI() {
+  const status = $('accountStatusText');
+  const changeButton = $('changePasswordBtn');
+  const signOutButton = $('signOutBtn');
+  if (!status) return;
+
+  if (!firebaseConfigured()) {
+    status.textContent = 'Local mode — login is not configured for this copy.';
+    if (changeButton) changeButton.hidden = true;
+    if (signOutButton) signOutButton.hidden = true;
+    return;
+  }
+
+  if (state.authUser) {
+    status.textContent = `Signed in as ${state.authUser.email}. Only this owner account can read or change the shop data.`;
+    if (changeButton) changeButton.hidden = false;
+    if (signOutButton) signOutButton.hidden = false;
+  } else {
+    status.textContent = 'Not signed in.';
+    if (changeButton) changeButton.hidden = true;
+    if (signOutButton) signOutButton.hidden = true;
+  }
+}
+
+function maybePromptPasswordChange(user) {
+  if (!user || !firebaseConfigured()) return;
+  if (metaGet('ownerPasswordAcknowledged')) return;
+  metaSet('ownerPasswordAcknowledged', true);
+  setTimeout(() => {
+    askConfirm('For security, set your own owner password now? The setup password is temporary.')
+      .then((ok) => { if (ok) openPasswordDialog(); });
+  }, 1400);
+}
+
+async function handleLoginSubmit(event) {
+  event.preventDefault();
+  if (!sync.auth || !sync.authModule) {
+    showLoginError('Login is still starting. Wait a moment and try again.');
+    return;
+  }
+  const email = $('loginEmail').value.trim();
+  const password = $('loginPassword').value;
+  showLoginError('');
+  setLoginBusy(true, 'Signing in…');
+  try {
+    await sync.authModule.signInWithEmailAndPassword(sync.auth, email, password);
+    localStorage.setItem(OWNER_EMAIL_HINT, email);
+  } catch (err) {
+    showLoginError(authErrorMessage(err));
+  } finally {
+    setLoginBusy(false);
+  }
+}
+
+async function handleForgotPassword() {
+  if (!sync.auth || !sync.authModule) {
+    showLoginError('Login is still starting. Wait a moment and try again.');
+    return;
+  }
+  const email = $('loginEmail').value.trim();
+  if (!email) {
+    showLoginError('Type your owner email above, then tap Forgot password.');
+    return;
+  }
+  try {
+    await sync.authModule.sendPasswordResetEmail(sync.auth, email);
+    showLoginError(`Password reset email sent to ${email}.`, true);
+  } catch (err) {
+    showLoginError(authErrorMessage(err));
+  }
+}
+
+function openPasswordDialog() {
+  if (!sync.auth || !sync.auth.currentUser || !sync.authModule) {
+    toast('Sign in first');
+    return;
+  }
+  $('currentPassword').value = '';
+  $('newPassword').value = '';
+  $('confirmPassword').value = '';
+  const error = $('passwordError');
+  error.hidden = true;
+  error.textContent = '';
+  showModal('passwordDialog');
+  setTimeout(() => $('currentPassword').focus(), 80);
+}
+
+function closePasswordDialog() {
+  hideModal('passwordDialog');
+}
+
+async function submitPasswordChange(event) {
+  event.preventDefault();
+  const error = $('passwordError');
+  const showError = (message) => {
+    error.textContent = message;
+    error.hidden = false;
+  };
+  error.hidden = true;
+  if (!sync.auth || !sync.auth.currentUser || !sync.authModule) {
+    showError('You are not signed in.');
+    return;
+  }
+
+  const current = $('currentPassword').value;
+  const next = $('newPassword').value;
+  const confirm = $('confirmPassword').value;
+  if (next.length < 8) {
+    showError('Use at least 8 characters for the new password.');
+    return;
+  }
+  if (next !== confirm) {
+    showError('The new passwords do not match.');
+    return;
+  }
+
+  const button = $('passwordSubmit');
+  button.disabled = true;
+  button.textContent = 'Updating…';
+  try {
+    const credential = sync.authModule.EmailAuthProvider.credential(sync.auth.currentUser.email, current);
+    await sync.authModule.reauthenticateWithCredential(sync.auth.currentUser, credential);
+    await sync.authModule.updatePassword(sync.auth.currentUser, next);
+    metaSet('ownerPasswordAcknowledged', true);
+    closePasswordDialog();
+    toast('Owner password updated');
+  } catch (err) {
+    showError(authErrorMessage(err));
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Update password';
+  }
+}
+
+async function signOutOwner() {
+  const ok = await askConfirm('Sign out of the shop manager on this device? Cloud data stays safe.');
+  if (!ok) return;
+  try {
+    if (sync.auth && sync.authModule) await sync.authModule.signOut(sync.auth);
+  } catch (err) {
+    console.warn('[auth] sign out failed', err);
+  }
+  location.reload();
+}
+
 async function initFirebase() {
   if (sync.ready || sync.initializing) return;
   if (!firebaseConfigured()) {
     updateSyncStatus('local', 'Local only — data stays on this device.');
+    return;
+  }
+
+  // Firestore was already initialized earlier in this page session (for
+  // example after a re-login). Reuse it instead of initializing twice.
+  if (sync.fs && sync.db) {
+    sync.ready = true;
+    try {
+      if (metaGet('pendingCloudRestore')) {
+        await replaceCloudData();
+        await storeClear('outbox');
+        metaSet('pendingCloudRestore', false);
+        sync.seeded = true;
+        metaSet('fbSeeded', true);
+        metaSet('fbSeededProject', window.FIREBASE_CONFIG.projectId);
+      } else {
+        await flushOutbox();
+      }
+      startFirebaseListeners();
+      updateSyncStatus('connecting', 'Waiting for Firestore…');
+    } catch (err) {
+      sync.ready = false;
+      handleSyncError(err);
+    }
     return;
   }
 
@@ -1141,9 +1706,9 @@ async function initFirebase() {
       import(`${base}firebase-firestore.js`)
     ]);
 
-    const app = appModule.getApps().length
-      ? appModule.getApp()
-      : appModule.initializeApp(window.FIREBASE_CONFIG);
+    const app = state.firebaseApp
+      || (appModule.getApps().length ? appModule.getApp() : appModule.initializeApp(window.FIREBASE_CONFIG));
+    state.firebaseApp = app;
     let db;
     try {
       db = firestoreModule.initializeFirestore(app, {
@@ -1155,6 +1720,14 @@ async function initFirebase() {
     } catch (cacheError) {
       console.warn('[Firebase] persistent cache unavailable, using in-memory cache', cacheError);
       db = firestoreModule.getFirestore(app);
+    }
+
+    if (window.FIREBASE_CONFIG && window.FIREBASE_CONFIG.useEmulators) {
+      try {
+        firestoreModule.connectFirestoreEmulator(db, '127.0.0.1', 8080);
+      } catch (emulatorError) {
+        console.warn('[Firebase] could not connect to the Firestore emulator', emulatorError);
+      }
     }
 
     sync.fs = firestoreModule;
@@ -1189,13 +1762,18 @@ async function initFirebase() {
 }
 
 function startFirebaseListeners() {
+  for (const unsubscribe of sync.unsubs) {
+    try { unsubscribe(); } catch { /* already detached */ }
+  }
+  sync.unsubs = [];
   for (const name of ['products', 'sales', 'changes']) {
-    sync.fs.onSnapshot(
+    const unsubscribe = sync.fs.onSnapshot(
       sync.fs.collection(sync.db, name),
       { includeMetadataChanges: true },
       (snapshot) => handleSnapshot(name, snapshot),
       (err) => handleSyncError(err, true)
     );
+    sync.unsubs.push(unsubscribe);
   }
 }
 
@@ -1224,6 +1802,7 @@ async function replaceCloudData() {
         await batch.commit();
       }
     }
+    await rebuildPublicData();
   } finally {
     sync.importing = false;
   }
@@ -1726,6 +2305,7 @@ async function deleteSaleRecord(sale) {
   state.sales = state.sales.filter((row) => row.id !== sale.id);
   invalidateRevenue();
   await persistDelete('sales', sale.id);
+  await removePublicVoucher(sale.voucherCode);
 
   const restored = [];
   for (const item of sale.items || []) {
@@ -1736,6 +2316,7 @@ async function deleteSaleRecord(sale) {
     product.stock = Math.max(0, Math.round(current + item.qty));
     product.updatedAt = nowISO();
     await persistRecord('products', product);
+    await enqueuePublicCatalog(product);
     restored.push(product.name);
   }
 
@@ -1778,6 +2359,7 @@ async function clearSalesHistory() {
   if (!ok) return;
 
   await clearCollection('sales');
+  if (firebaseConfigured()) await enqueueOutbox(PUBLIC_VOUCHERS, '*', 'clear', null);
   invalidateRevenue();
   await addChange(
     'void',
@@ -1990,6 +2572,7 @@ async function saveProductFromForm() {
     state.products = normalizeCollection('products', state.products);
 
     await persistRecord('products', product);
+    await enqueuePublicCatalog(product);
     await addChange(existing ? 'edit' : 'add', product.name, describeProductChange(existing, product), { productId: product.id });
     scheduleFlush();
 
@@ -2017,6 +2600,7 @@ async function deleteEditingProduct() {
   saveCart();
 
   await persistDelete('products', product.id);
+  await removePublicCatalog(product.id);
   await addChange('delete', product.name, `Deleted product · was ${money(product.price)}`, { productId: product.id });
   scheduleFlush();
 
@@ -2173,10 +2757,13 @@ function findSaleByVoucher(value) {
 
 function voucherVerifyUrl(code) {
   if (!code) return '';
-  const base = location.origin && location.origin !== 'null'
-    ? `${location.origin}${location.pathname}`
-    : '';
-  return base ? `${base}#voucher=${encodeURIComponent(code)}` : code;
+  try {
+    const target = new URL('shop.html', location.href);
+    target.hash = `voucher=${encodeURIComponent(code)}`;
+    return target.href;
+  } catch {
+    return code;
+  }
 }
 
 function renderVoucherQr(text) {
@@ -2280,9 +2867,7 @@ function showVoucher(sale, options = {}) {
 
   $('voucherNote').textContent = mode === 'verify'
     ? 'This voucher matches the shop sales record.'
-    : mode === 'sale'
-      ? 'Sale saved. Scan the QR code to verify this voucher.'
-      : 'Scan the QR code to verify this voucher.';
+    : 'Sale saved. The printed QR opens the public shop page and verifies this voucher.';
 
   renderVoucherQr(voucherVerifyUrl(sale.voucherCode));
   showModal('voucherDialog');
@@ -2361,7 +2946,7 @@ function printVoucher() {
   <hr>
   <div class="total"><span>TOTAL</span><span>${money(sale.total)}</span></div>
   ${payment}
-  <div class="note">Scan the QR code to verify this voucher.<br>${escapeHtml(url)}</div>
+  <div class="note">Scan the QR code to verify this voucher on our public shop page.<br>${escapeHtml(url)}</div>
   <div class="no-print"><button onclick="window.print()">Print again</button></div>
 </body>
 </html>`);
@@ -2564,6 +3149,7 @@ async function completeCheckout() {
     state.sales.unshift(sale);
     invalidateRevenue();
     await persistRecord('sales', sale);
+    await enqueuePublicVoucher(sale);
 
     const updatedProducts = [];
     for (const { product, qty } of entries) {
@@ -2572,7 +3158,10 @@ async function completeCheckout() {
       product.updatedAt = nowISO();
       updatedProducts.push(product);
     }
-    for (const product of updatedProducts) await persistRecord('products', product);
+    for (const product of updatedProducts) {
+      await persistRecord('products', product);
+      await enqueuePublicCatalog(product);
+    }
 
     await addChange(
       'sale',
@@ -2928,6 +3517,16 @@ function switchTab(tab) {
 /* ------------------------------------------------------------------ */
 
 function bindEvents() {
+  $('loginForm').addEventListener('submit', handleLoginSubmit);
+  $('forgotPasswordBtn').addEventListener('click', handleForgotPassword);
+  $('changePasswordBtn').addEventListener('click', openPasswordDialog);
+  $('signOutBtn').addEventListener('click', signOutOwner);
+  $('passwordForm').addEventListener('submit', submitPasswordChange);
+  $('passwordCancel').addEventListener('click', closePasswordDialog);
+  $('passwordDialog').addEventListener('click', (event) => {
+    if (event.target === $('passwordDialog')) closePasswordDialog();
+  });
+
   for (const button of document.querySelectorAll('.bottomnav button[data-tab]')) {
     button.addEventListener('click', () => switchTab(button.dataset.tab));
   }
@@ -3091,7 +3690,8 @@ function bindEvents() {
 
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
-    if (!$('pinDialog').hidden) closePinDialog(null);
+    if (!$('passwordDialog').hidden) closePasswordDialog();
+    else if (!$('pinDialog').hidden) closePinDialog(null);
     else if (!$('voucherDialog').hidden) closeVoucherDialog();
     else if (!$('verifyDialog').hidden) closeVerifyDialog();
     else if (!$('checkoutDialog').hidden) closeCheckoutDialog();
@@ -3113,7 +3713,7 @@ function bindEvents() {
       updateSyncStatus('connecting', 'Back online — syncing…');
       scheduleFlush();
       updateSyncFromMeta();
-    } else if (!sync.ready && firebaseConfigured()) {
+    } else if (!sync.ready && firebaseConfigured() && state.authUser) {
       initFirebase();
     }
   });
@@ -3131,31 +3731,16 @@ async function init() {
   started = true;
 
   bindEvents();
-  restoreCart();
-
-  try {
-    const [products, sales, changes] = await Promise.all([
-      storeAll('products'),
-      storeAll('sales'),
-      storeAll('changes')
-    ]);
-    state.products = normalizeCollection('products', products);
-    state.sales = normalizeCollection('sales', sales);
-    state.changes = normalizeCollection('changes', changes);
-  } catch (err) {
-    console.warn('[local] could not load data', err);
-  }
-
-  pruneCart();
-  renderAll();
-  handleVoucherHash();
+  redirectLegacyVoucherLink();
 
   if (firebaseConfigured()) {
-    updateSyncStatus('connecting', 'Starting cloud sync…');
-    initFirebase();
+    updateSyncStatus('connecting', 'Checking owner sign-in…');
+    initAuth();
   } else {
     updateSyncStatus('local', 'Local only — data stays on this device.');
+    await unlockOwnerApp(null);
   }
+
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
     navigator.serviceWorker.register('./sw.js').catch((err) => console.warn('[service worker]', err));
   }

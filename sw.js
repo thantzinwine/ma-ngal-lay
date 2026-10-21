@@ -1,10 +1,14 @@
-const CACHE = 'ma-ngal-lay-v11';
+const CACHE = 'ma-ngal-lay-v12';
 
 const ASSETS = [
   './',
   './index.html',
+  './shop.html',
   './styles.css',
+  './shop.css',
   './app.js',
+  './public.js',
+  './image.png',
   './vendor/qrcode.min.js',
   './firebase-config.js',
   './manifest.json',
@@ -57,10 +61,11 @@ self.addEventListener('fetch', (e) => {
   }
 
   if (request.mode === 'navigate') {
+    const isPublicPage = /\/shop\.html$/i.test(url.pathname);
     e.respondWith(
       fetch(request)
         .then((response) => cachePut(request, response))
-        .catch(() => caches.match(request).then((cached) => cached || caches.match('./index.html')))
+        .catch(() => caches.match(request).then((cached) => cached || caches.match(isPublicPage ? './shop.html' : './index.html')))
     );
     return;
   }
