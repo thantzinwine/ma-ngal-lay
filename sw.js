@@ -1,4 +1,4 @@
-const CACHE = 'ma-ngal-lay-v9';
+const CACHE = 'ma-ngal-lay-v10';
 
 const ASSETS = [
   './',

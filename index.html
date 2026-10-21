@@ -91,7 +91,7 @@
         <button data-htab="sales" class="active">💰 Sales</button>
         <button data-htab="changes">📝 Changes</button>
       </div>
-      <p class="owner-hint" id="ownerHint">🔒 Owner controls are locked. Set a PIN in Settings to remove history.</p>
+      <p class="owner-hint" id="ownerHint">🗑️ Tap a delete button to remove a history entry. Set a PIN in Settings to protect it.</p>
       <div id="history-sales">
         <div class="rev-grid">
           <div class="rev-card"><span>Today</span><strong id="revToday">0 K</strong></div>
@@ -209,6 +209,22 @@
       <div class="confirm-actions">
         <button id="confirmNo" class="btn">Cancel</button>
         <button id="confirmYes" class="btn danger">Yes</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="sheet-backdrop center" id="checkoutDialog" hidden>
+    <div class="confirm checkout-dialog" role="dialog" aria-modal="true" aria-labelledby="checkoutTitle">
+      <h3 id="checkoutTitle">Confirm purchase</h3>
+      <p class="about" id="checkoutSummary">0 items</p>
+      <div class="checkout-total" id="checkoutTotal">0 K</div>
+      <label class="field checkout-paid-label">Amount received (MMK)
+        <input id="checkoutPaid" type="text" inputmode="numeric" autocomplete="off" placeholder="Type the amount">
+      </label>
+      <p class="checkout-change" id="checkoutChange" hidden></p>
+      <div class="confirm-actions">
+        <button id="checkoutCancel" class="btn" type="button">Cancel</button>
+        <button id="checkoutConfirm" class="btn primary" type="button">Confirm Purchase</button>
       </div>
     </div>
   </div>

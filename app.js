@@ -589,6 +589,22 @@ function requireOwner() {
   return true;
 }
 
+// Used by history delete buttons: asks for the owner PIN only when one is set.
+async function ensureOwnerAccess() {
+  if (state.ownerUnlocked) {
+    armOwnerLock();
+    return true;
+  }
+  if (!ownerPinSet()) return true;
+  const ok = await askPin('unlock');
+  if (!ok) return false;
+  state.ownerUnlocked = true;
+  armOwnerLock();
+  renderOwnerUI();
+  renderHistoryIfVisible();
+  return true;
+}
+
 async function setOwnerPinFlow() {
   const ok = await askPin('create');
   if (!ok) return;
@@ -643,18 +659,18 @@ function renderOwnerUI() {
   $('ownerDangerZone').hidden = !unlocked;
 
   $('ownerStatusText').textContent = !hasPin
-    ? 'No owner PIN is set. Set one to enable owner-only history removal.'
+    ? 'No owner PIN is set. Delete buttons work without a PIN — set one to protect history.'
     : unlocked
       ? 'Owner mode is unlocked on this device. It locks automatically after 10 minutes of inactivity.'
-      : 'Owner mode is locked. Unlock it with your PIN to remove history.';
+      : 'Owner mode is locked. Enter your PIN when removing history.';
 
   const hint = $('ownerHint');
   if (hint) {
     hint.textContent = !hasPin
-      ? '🔒 Owner controls are locked. Set a PIN in Settings to remove history.'
+      ? '🗑️ Delete buttons are open. Set a PIN in Settings to protect history.'
       : unlocked
-        ? '🔓 Owner mode is on. Use the 🗑️ button on a sale to remove it.'
-        : '🔒 Owner mode is locked. Unlock it in Settings to remove history.';
+        ? '🔓 Owner mode is on. Tap 🗑️ to remove history entries.'
+        : '🔒 Owner mode is locked. Tap 🗑️ to enter your PIN and remove history.';
     hint.classList.toggle('unlocked', unlocked);
   }
 }
@@ -819,6 +835,29 @@ function stepQty(id, delta) {
   if (delta > 0 && current >= max) {
     toast(product.stock === 0 ? `${product.name} is out of stock` : `Only ${product.stock} left`);
     return;
+  }
+  if (next <= 0) state.cart.delete(id);
+  else state.cart.set(id, next);
+  saveCart();
+  renderPOS();
+  renderCart();
+}
+
+// Type a quantity directly into the bill. Invalid/blank input falls back to
+// the previous quantity; 0 removes the line.
+function setCartQty(id, raw) {
+  const product = state.products.find((p) => p.id === id);
+  if (!product) return;
+  const typed = Math.floor(parseNumber(raw));
+  if (!Number.isFinite(typed) || typed < 0) {
+    renderCart();
+    return;
+  }
+  let next = Math.min(typed, 9999);
+  const max = product.stock === null ? Infinity : product.stock;
+  if (next > max) {
+    next = max;
+    toast(product.stock <= 0 ? `${product.name} is out of stock` : `Only ${product.stock} left of ${product.name}`);
   }
   if (next <= 0) state.cart.delete(id);
   else state.cart.set(id, next);
@@ -1422,13 +1461,26 @@ function renderCart() {
     const stepper = document.createElement('div');
     stepper.className = 'stepper';
     const minus = createButton('−', '', `Remove one ${product.name}`);
-    const qtyNode = document.createElement('span');
-    qtyNode.className = 'qty';
-    qtyNode.textContent = String(qty);
+    const qtyInput = document.createElement('input');
+    qtyInput.type = 'text';
+    qtyInput.setAttribute('inputmode', 'numeric');
+    qtyInput.setAttribute('autocomplete', 'off');
+    qtyInput.className = 'qty-input';
+    qtyInput.value = String(qty);
+    qtyInput.title = 'Type the quantity';
+    qtyInput.setAttribute('aria-label', `Quantity of ${product.name}`);
+    qtyInput.addEventListener('focus', () => qtyInput.select());
+    qtyInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        qtyInput.blur();
+      }
+    });
+    qtyInput.addEventListener('change', () => setCartQty(product.id, qtyInput.value));
     const plus = createButton('+', '', `Add one ${product.name}`);
     minus.addEventListener('click', () => stepQty(product.id, -1));
     plus.addEventListener('click', () => stepQty(product.id, 1));
-    stepper.append(minus, qtyNode, plus);
+    stepper.append(minus, qtyInput, plus);
 
     const lineTotal = document.createElement('div');
     lineTotal.className = 'lt';
@@ -1600,13 +1652,11 @@ function renderHistory() {
         `${formatDateTime(sale.createdAt)}${itemNames ? ` · ${itemNames}` : ''}`,
         money(sale.total),
         '',
-        state.ownerUnlocked
-          ? {
-            label: '🗑️',
-            title: `Remove this sale of ${money(sale.total)}`,
-            onClick: () => deleteSaleRecord(sale)
-          }
-          : null
+        {
+          label: '🗑️',
+          title: `Remove this sale of ${money(sale.total)}`,
+          onClick: () => deleteSaleRecord(sale)
+        }
       );
     })
     : [makeLogCard('No sales yet', 'Complete a sale from the Bill tab.', '')]
@@ -1619,14 +1669,19 @@ function renderHistory() {
       `${icons[change.type] || '•'} ${change.name}`,
       `${formatDateTime(change.createdAt)}${change.detail ? ` · ${change.detail}` : ''}`,
       Number.isFinite(change.amount) ? money(change.amount) : '',
-      Number.isFinite(change.amount) ? '' : 'count'
+      Number.isFinite(change.amount) ? '' : 'count',
+      {
+        label: '🗑️',
+        title: 'Remove this history entry',
+        onClick: () => deleteChangeRecord(change)
+      }
     ))
     : [makeLogCard('No changes yet', 'Add, edit or delete a product to see it here.', '')]
   ));
 }
 
 async function deleteSaleRecord(sale) {
-  if (!requireOwner()) return;
+  if (!(await ensureOwnerAccess())) return;
   if (!sale || !state.sales.some((row) => row.id === sale.id)) return;
 
   const ok = await askConfirm(
@@ -1659,6 +1714,20 @@ async function deleteSaleRecord(sale) {
   scheduleFlush();
   renderAll();
   toast(restored.length ? 'Sale removed · stock restored' : 'Sale removed');
+}
+
+async function deleteChangeRecord(change) {
+  if (!(await ensureOwnerAccess())) return;
+  if (!change || !state.changes.some((row) => row.id === change.id)) return;
+
+  const ok = await askConfirm(`Remove "${change.name}" from the change log? This syncs to all devices.`);
+  if (!ok) return;
+
+  state.changes = state.changes.filter((row) => row.id !== change.id);
+  await persistDelete('changes', change.id);
+  scheduleFlush();
+  renderAll();
+  toast('History entry removed');
 }
 
 async function clearSalesHistory() {
@@ -1926,10 +1995,87 @@ async function deleteEditingProduct() {
 /* Checkout                                                            */
 /* ------------------------------------------------------------------ */
 
-async function checkout() {
+function checkoutTotal() {
+  return cartEntries().reduce((sum, { product, qty }) => sum + product.price * qty, 0);
+}
+
+function updateCheckoutChange() {
+  const total = checkoutTotal();
+  const node = $('checkoutChange');
+  const confirm = $('checkoutConfirm');
+  const raw = $('checkoutPaid').value.trim();
+
+  if (!raw) {
+    node.hidden = true;
+    node.classList.remove('short');
+    confirm.disabled = false;
+    return;
+  }
+
+  const paid = parseNumber(raw);
+  if (!Number.isFinite(paid)) {
+    node.hidden = false;
+    node.classList.add('short');
+    node.textContent = 'Enter a valid amount';
+    confirm.disabled = true;
+    return;
+  }
+
+  if (paid < total) {
+    node.hidden = false;
+    node.classList.add('short');
+    node.textContent = `Short by ${money(total - paid)}`;
+    confirm.disabled = true;
+    return;
+  }
+
+  node.hidden = false;
+  node.classList.remove('short');
+  node.textContent = paid > total ? `Change: ${money(paid - total)}` : 'Exact amount';
+  confirm.disabled = false;
+}
+
+function openCheckoutDialog() {
   const entries = cartEntries();
   if (!entries.length) {
     toast('The bill is empty');
+    return;
+  }
+  const count = entries.reduce((sum, entry) => sum + entry.qty, 0);
+  const total = entries.reduce((sum, entry) => sum + entry.product.price * entry.qty, 0);
+
+  $('checkoutSummary').textContent =
+    `${count} item${count === 1 ? '' : 's'} · ${entries.length} product${entries.length === 1 ? '' : 's'}`;
+  $('checkoutTotal').textContent = money(total);
+  const paidInput = $('checkoutPaid');
+  paidInput.value = '';
+  paidInput.placeholder = `Total ${money(total)}`;
+  $('checkoutConfirm').textContent = 'Confirm Purchase';
+  updateCheckoutChange();
+  showModal('checkoutDialog');
+  setTimeout(() => paidInput.focus(), 80);
+}
+
+function closeCheckoutDialog() {
+  hideModal('checkoutDialog');
+}
+
+async function completeCheckout() {
+  const entries = cartEntries();
+  if (!entries.length) {
+    closeCheckoutDialog();
+    toast('The bill is empty');
+    return;
+  }
+
+  const total = entries.reduce((sum, { product, qty }) => sum + product.price * qty, 0);
+  const count = entries.reduce((sum, entry) => sum + entry.qty, 0);
+  const paidRaw = $('checkoutPaid').value.trim();
+  const paid = paidRaw ? parseNumber(paidRaw) : NaN;
+
+  if (paidRaw && (!Number.isFinite(paid) || paid < total)) {
+    updateCheckoutChange();
+    toast('Amount received is less than the total');
     return;
   }
 
@@ -1939,13 +2085,13 @@ async function checkout() {
     price: product.price,
     qty
   }));
-  const total = items.reduce((sum, item) => sum + item.price * item.qty, 0);
-  const count = items.reduce((sum, item) => sum + item.qty, 0);
   const sale = { id: uid(), items, total, count, createdAt: nowISO() };
 
-  const button = $('checkoutBtn');
-  button.disabled = true;
-  button.textContent = 'Saving…';
+  const confirmButton = $('checkoutConfirm');
+  const checkoutButton = $('checkoutBtn');
+  confirmButton.disabled = true;
+  confirmButton.textContent = 'Saving…';
+  checkoutButton.disabled = true;
 
   try {
     state.sales.unshift(sale);
@@ -1971,14 +2117,18 @@ async function checkout() {
 
     state.cart.clear();
     saveCart();
+    closeCheckoutDialog();
     renderAll();
-    toast(`Sale saved · ${money(total)}`);
+    const change = Number.isFinite(paid) ? paid - total : 0;
+    toast(change > 0 ? `Sale saved · Change ${money(change)}` : `Sale saved · ${money(total)}`);
   } catch (err) {
     console.error(err);
     toast('Could not complete the sale — please try again');
   } finally {
-    button.disabled = false;
-    button.textContent = 'Complete Sale';
+    confirmButton.disabled = false;
+    confirmButton.textContent = 'Confirm Purchase';
+    checkoutButton.disabled = false;
+    checkoutButton.textContent = 'Complete Sale';
   }
 }
 
@@ -2377,7 +2527,16 @@ function bindEvents() {
   $('saveBtn').addEventListener('click', saveProductFromForm);
   $('deleteBtn').addEventListener('click', deleteEditingProduct);
   $('sheetClose').addEventListener('click', closeProductSheet);
-  $('checkoutBtn').addEventListener('click', checkout);
+  $('checkoutBtn').addEventListener('click', openCheckoutDialog);
+  $('checkoutCancel').addEventListener('click', closeCheckoutDialog);
+  $('checkoutConfirm').addEventListener('click', completeCheckout);
+  $('checkoutPaid').addEventListener('input', updateCheckoutChange);
+  $('checkoutPaid').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      if (!$('checkoutConfirm').disabled) completeCheckout();
+    }
+  });
 
   $('confirmNo').addEventListener('click', () => closeConfirm(false));
   $('confirmYes').addEventListener('click', () => closeConfirm(true));
@@ -2439,6 +2598,9 @@ function bindEvents() {
   $('confirmDialog').addEventListener('click', (event) => {
     if (event.target === $('confirmDialog')) closeConfirm(false);
   });
+  $('checkoutDialog').addEventListener('click', (event) => {
+    if (event.target === $('checkoutDialog')) closeCheckoutDialog();
+  });
   $('pinDialog').addEventListener('click', (event) => {
     if (event.target === $('pinDialog')) closePinDialog(null);
   });
@@ -2452,6 +2614,7 @@ function bindEvents() {
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
     if (!$('pinDialog').hidden) closePinDialog(null);
+    else if (!$('checkoutDialog').hidden) closeCheckoutDialog();
     else if (!$('confirmDialog').hidden) closeConfirm(false);
     else if (!$('scanModal').hidden) closeScanner();
     else if (!$('imageSearchModal').hidden) closeImageSearch();
