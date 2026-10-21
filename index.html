@@ -160,7 +160,18 @@
           <button id="signOutBtn" class="btn block">Sign out</button>
         </div>
         <h2>Cloud sync</h2>
-        <p class="about" id="syncStatusText">Local only — data stays on this device.</p>
+        <div class="sync-panel" id="cloudSyncBlock">
+          <div class="sync-panel-head">
+            <span class="sync-mode" id="syncModeText">Auto-sync is on.</span>
+            <span class="sync-last" id="lastSyncText">Last sync: not yet</span>
+          </div>
+          <p class="about" id="syncStatusText">Local only — data stays on this device.</p>
+          <div class="owner-actions">
+            <button id="syncNowBtn" class="btn primary block" type="button">Sync now</button>
+            <button id="syncPauseBtn" class="btn block" type="button">Pause cloud sync</button>
+          </div>
+          <p class="about sync-note">While paused, sales, costs and edits stay on this phone. Tap <strong>Sync now</strong> to upload them. Vouchers created while paused cannot be verified by customers until then.</p>
+        </div>
         <p class="about sync-project" id="syncProjectText">No Firebase project configured. Add firebase-config.js to sync across devices.</p>
         <h2>Owner PIN (extra local lock)</h2>
         <p class="about" id="ownerStatusText">No owner PIN is set. Set one to protect history removal on this device.</p>

@@ -28,6 +28,7 @@ const VOUCHER_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const PUBLIC_CATALOG = 'catalog';
 const PUBLIC_VOUCHERS = 'vouchers';
 const PUBLIC_META_VERSION = 1;
+const SYNC_PAUSED_TEXT = 'Sync paused — changes stay on this phone until you tap Sync now.';
 const OWNER_EMAIL_HINT = 'mnl-owner-email';
 
 /* ------------------------------------------------------------------ */
@@ -60,6 +61,8 @@ const sync = {
   initializing: false,
   flushing: false,
   importing: false,
+  paused: false,
+  busy: false,
   seeded: false,
   serverSnapshots: new Set(),
   meta: {},
@@ -82,6 +85,7 @@ let scanner = null;
 let scannerRunning = false;
 let scanToken = 0;
 let outboxCounter = 0;
+let flushTask = null;
 const mirrorQueues = new Map();
 let imageModelPromise = null;
 let toastTimer = null;
@@ -984,19 +988,37 @@ async function addChange(type, name, detail, extra = {}) {
   return change;
 }
 
-function scheduleFlush() {
-  if (!sync.ready || sync.importing) return;
-  if (sync.flushing) return;
+function startFlush() {
+  if (flushTask) return flushTask;
+  if (!sync.ready || sync.importing || sync.paused) return Promise.resolve(false);
   sync.flushing = true;
-  flushOutbox()
-    .catch((err) => handleSyncError(err))
-    .finally(() => { sync.flushing = false; });
+  updateSyncControls();
+  flushTask = flushOutbox()
+    .then(() => {
+      sync.errorShown = false;
+      return !sync.paused;
+    })
+    .catch((err) => {
+      handleSyncError(err);
+      return false;
+    })
+    .finally(() => {
+      sync.flushing = false;
+      flushTask = null;
+      updateSyncControls();
+    });
+  return flushTask;
+}
+
+function scheduleFlush() {
+  startFlush();
 }
 
 async function flushOutbox() {
-  if (!sync.ready || !sync.fs || !sync.db) return;
+  if (!sync.ready || !sync.fs || !sync.db || sync.paused) return;
   // Loop so writes queued while a flush is in flight are picked up too.
   for (let pass = 0; pass < 20; pass += 1) {
+    if (sync.paused) return;
     const entries = await storeAll('outbox');
     if (!entries.length) return;
     entries.sort((a, b) => {
@@ -1005,6 +1027,7 @@ async function flushOutbox() {
       return aSeq - bSeq;
     });
     for (const entry of entries) {
+      if (sync.paused) return;
       if (!entry || !entry.collection || !entry.docId) {
         if (entry && entry.id) await storeDelete('outbox', entry.id);
         continue;
@@ -1057,9 +1080,165 @@ function updateSyncStatus(status, text) {
     if (firebaseConfigured() && cfg) projectText.textContent = `Firestore project: ${cfg.projectId}`;
     else projectText.textContent = 'No Firebase project configured. Add firebase-config.js to sync across devices.';
   }
+  updateSyncControls();
+}
+
+function updateSyncControls() {
+  const configured = firebaseConfigured();
+  const signedIn = Boolean(state.authUser);
+  const paused = Boolean(sync.paused);
+  const nowButton = $('syncNowBtn');
+  const pauseButton = $('syncPauseBtn');
+  const modeText = $('syncModeText');
+  const lastText = $('lastSyncText');
+
+  if (modeText) {
+    if (!configured) modeText.textContent = 'Local only — no cloud sync.';
+    else if (!signedIn) modeText.textContent = 'Sign in to sync.';
+    else if (paused) modeText.textContent = 'Paused — changes stay on this phone.';
+    else modeText.textContent = 'Auto-sync is on.';
+  }
+
+  if (lastText) {
+    const last = metaGet('lastSyncAt');
+    lastText.textContent = last ? `Last sync: ${formatDateTime(last)}` : 'Last sync: not yet';
+  }
+
+  if (nowButton) {
+    nowButton.textContent = paused ? 'Resume & sync now' : 'Sync now';
+    nowButton.disabled = !configured || !signedIn || sync.busy || sync.initializing;
+  }
+  if (pauseButton) {
+    pauseButton.hidden = paused;
+    pauseButton.disabled = !configured || !signedIn || sync.busy || sync.initializing;
+  }
+}
+
+async function pauseCloudSync() {
+  if (!firebaseConfigured() || !state.authUser || sync.busy) return;
+  sync.busy = true;
+  sync.paused = true;
+  metaSet('syncPaused', true);
+  sync.meta = {};
+
+  for (const unsubscribe of sync.unsubs) {
+    try { unsubscribe(); } catch { /* already detached */ }
+  }
+  sync.unsubs = [];
+
+  updateSyncStatus('paused', SYNC_PAUSED_TEXT);
+  updateSyncControls();
+
+  try {
+    if (sync.ready && sync.fs && sync.db) {
+      await sync.fs.disableNetwork(sync.db);
+    }
+  } catch (err) {
+    console.warn('[Firebase] could not pause the network', err);
+  } finally {
+    sync.busy = false;
+    updateSyncControls();
+  }
+
+  toast('Cloud sync paused — changes stay on this phone');
+}
+
+async function syncNow() {
+  if (sync.busy || sync.initializing) return;
+  if (!firebaseConfigured()) {
+    toast('Cloud sync is not configured');
+    return;
+  }
+  if (!state.authUser) {
+    toast('Sign in first');
+    return;
+  }
+  if (!navigator.onLine) {
+    toast('No internet — connect first, then tap Sync now');
+    return;
+  }
+
+  sync.busy = true;
+  updateSyncControls();
+  try {
+    const wasPaused = sync.paused;
+    sync.paused = false;
+    metaSet('syncPaused', false);
+    updateSyncStatus('connecting', wasPaused ? 'Resuming cloud sync…' : 'Syncing now…');
+
+    if (!sync.ready || !sync.fs || !sync.db) {
+      await initFirebase();
+      if (!sync.ready) throw new Error('Cloud sync is not ready');
+    } else {
+      try {
+        await sync.fs.enableNetwork(sync.db);
+      } catch (err) {
+        console.warn('[Firebase] could not resume the network', err);
+      }
+
+      if (metaGet('pendingCloudRestore')) {
+        await replaceCloudData();
+        await storeClear('outbox');
+        metaSet('pendingCloudRestore', false);
+        metaSet('fbSeeded', true);
+        metaSet('fbSeededProject', window.FIREBASE_CONFIG.projectId);
+        sync.seeded = true;
+      } else {
+        const result = await Promise.race([
+          startFlush(),
+          new Promise((resolve) => setTimeout(() => resolve('timeout'), 20000))
+        ]);
+        if (result === 'timeout') {
+          updateSyncStatus('connecting', 'Still uploading — keep the app open and check the connection.');
+          toast('Still uploading — check the connection');
+          return;
+        }
+        if (result !== true) throw new Error('Could not upload queued changes');
+      }
+
+      if (!sync.unsubs.length) startFirebaseListeners();
+    }
+
+    updateSyncStatus('connecting', 'Uploaded — waiting for Firestore…');
+    const idle = await waitForSyncIdle(15000);
+    if (idle) {
+      metaSet('lastSyncAt', nowISO());
+      sync.errorShown = false;
+      updateSyncStatus('synced', 'Synced with Firebase — products, sales, costs and changes are shared.');
+      toast('Sync complete');
+    } else {
+      updateSyncStatus('connecting', 'Uploaded — Firestore is still catching up.');
+      toast('Uploaded — Firestore is still catching up');
+    }
+  } catch (err) {
+    console.error('[sync] manual sync failed', err);
+    handleSyncError(err);
+    toast('Sync failed — changes are safe on this phone');
+  } finally {
+    sync.busy = false;
+    updateSyncControls();
+  }
+}
+
+async function waitForSyncIdle(timeout = 15000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeout) {
+    if (sync.paused || sync.fatal) return false;
+    const metas = Object.values(sync.meta);
+    if (metas.length >= SYNC_COLLECTIONS.length
+      && metas.every((meta) => meta && !meta.pending && !meta.fromCache)) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return false;
 }
 
 function updateSyncFromMeta() {
+  if (sync.paused) {
+    updateSyncStatus('paused', SYNC_PAUSED_TEXT);
+    return;
+  }
   if (!sync.ready || sync.fatal) return;
   if (!navigator.onLine) {
     updateSyncStatus('offline', 'Offline — changes are saved locally and will sync when online.');
@@ -1075,6 +1254,10 @@ function updateSyncFromMeta() {
     return;
   }
   if (metas.length >= SYNC_COLLECTIONS.length) {
+    if (sync.status !== 'synced') {
+      metaSet('lastSyncAt', nowISO());
+      sync.errorShown = false;
+    }
     updateSyncStatus('synced', 'Synced with Firebase — products, sales, costs and changes are shared.');
     if (!sync.announced) {
       sync.announced = true;
@@ -1088,6 +1271,21 @@ function updateSyncFromMeta() {
 function handleSyncError(err, fatal = false) {
   const code = err && err.code;
   console.warn('[Firebase] sync error:', code || (err && err.message) || err);
+  if (sync.paused) {
+    updateSyncStatus('paused', SYNC_PAUSED_TEXT);
+    return;
+  }
+  if (code === 'resource-exhausted' || code === 'quota-exceeded') {
+    updateSyncStatus(
+      'offline',
+      'Firestore limit reached (daily quota or 1 GiB storage). Changes are safe on this phone. Daily quotas reset around 1:30 PM.'
+    );
+    if (!sync.errorShown) {
+      sync.errorShown = true;
+      toast('Firestore limit reached — working offline');
+    }
+    return;
+  }
   if (fatal || code === 'permission-denied' || code === 'failed-precondition') {
     sync.fatal = true;
   }
@@ -1518,6 +1716,7 @@ async function unlockOwnerApp(user) {
   state.authUser = user || null;
   document.body.classList.remove('auth-locked');
   updateAccountUI();
+  updateSyncControls();
 
   if (!ownerAppStarted) {
     ownerAppStarted = true;
@@ -1723,6 +1922,15 @@ async function initFirebase() {
   // example after a re-login). Reuse it instead of initializing twice.
   if (sync.fs && sync.db) {
     sync.ready = true;
+    if (sync.paused) {
+      try {
+        await sync.fs.disableNetwork(sync.db);
+      } catch (err) {
+        console.warn('[Firebase] could not keep the network paused', err);
+      }
+      updateSyncStatus('paused', SYNC_PAUSED_TEXT);
+      return;
+    }
     try {
       if (metaGet('pendingCloudRestore')) {
         await replaceCloudData();
@@ -1740,9 +1948,17 @@ async function initFirebase() {
       sync.ready = false;
       handleSyncError(err);
     }
+    if (sync.paused) {
+      try {
+        await sync.fs.disableNetwork(sync.db);
+      } catch (err) {
+        console.warn('[Firebase] could not keep the network paused', err);
+      }
+      updateSyncStatus('paused', SYNC_PAUSED_TEXT);
+      return;
+    }
     return;
   }
-
   sync.initializing = true;
   sync.fatal = false;
   updateSyncStatus('connecting', 'Connecting to Firebase…');
@@ -1782,6 +1998,18 @@ async function initFirebase() {
     sync.ready = true;
     sync.seeded = Boolean(metaGet('fbSeeded')) && metaGet('fbSeededProject') === window.FIREBASE_CONFIG.projectId;
 
+    if (sync.paused) {
+      try {
+        await firestoreModule.disableNetwork(db);
+      } catch (err) {
+        console.warn('[Firebase] could not keep the network paused', err);
+      }
+      updateSyncStatus('paused', SYNC_PAUSED_TEXT);
+      sync.initializing = false;
+      updateSyncControls();
+      return;
+    }
+
     updateSyncStatus('connecting', 'Connecting to Firestore…');
 
     // A backup restore made while Firebase was unavailable must win over the cloud.
@@ -1796,6 +2024,18 @@ async function initFirebase() {
       await flushOutbox();
     }
 
+    if (sync.paused) {
+      try {
+        await firestoreModule.disableNetwork(db);
+      } catch (err) {
+        console.warn('[Firebase] could not keep the network paused', err);
+      }
+      updateSyncStatus('paused', SYNC_PAUSED_TEXT);
+      sync.initializing = false;
+      updateSyncControls();
+      return;
+    }
+
     startFirebaseListeners();
     updateSyncStatus('connecting', 'Waiting for Firestore…');
   } catch (err) {
@@ -1806,6 +2046,7 @@ async function initFirebase() {
     return;
   }
   sync.initializing = false;
+  updateSyncControls();
 }
 
 function startFirebaseListeners() {
@@ -3499,7 +3740,7 @@ async function importBackupFile(file) {
   state.changes.unshift(importChange);
   await persistRecord('changes', importChange);
 
-  if (sync.ready) {
+  if (sync.ready && !sync.paused) {
     try {
       await replaceCloudData();
       await storeClear('outbox');
@@ -3517,7 +3758,9 @@ async function importBackupFile(file) {
   }
 
   renderAll();
-  toast(`Backup restored · ${products.length} products`);
+  toast(sync.paused
+    ? `Backup restored locally · ${products.length} products — tap Sync now to upload`
+    : `Backup restored · ${products.length} products`);
 }
 
 /* ------------------------------------------------------------------ */
@@ -3756,6 +3999,8 @@ function bindEvents() {
   $('forgotPasswordBtn').addEventListener('click', handleForgotPassword);
   $('changePasswordBtn').addEventListener('click', openPasswordDialog);
   $('signOutBtn').addEventListener('click', signOutOwner);
+  $('syncNowBtn').addEventListener('click', syncNow);
+  $('syncPauseBtn').addEventListener('click', pauseCloudSync);
   $('passwordForm').addEventListener('submit', submitPasswordChange);
   $('passwordCancel').addEventListener('click', closePasswordDialog);
   $('passwordDialog').addEventListener('click', (event) => {
@@ -3907,8 +4152,10 @@ function bindEvents() {
   });
 
   $('syncDot').addEventListener('click', () => {
-    const detail = $('syncStatusText') ? $('syncStatusText').textContent : 'Local only';
-    toast(detail);
+    if (document.body.classList.contains('auth-locked')) return;
+    switchTab('settings');
+    const block = $('cloudSyncBlock');
+    if (block) block.scrollIntoView({ behavior: 'smooth', block: 'center' });
   });
 
   // Click outside a sheet/dialog closes it.
@@ -3959,6 +4206,10 @@ function bindEvents() {
   });
 
   window.addEventListener('online', () => {
+    if (sync.paused) {
+      updateSyncStatus('paused', SYNC_PAUSED_TEXT);
+      return;
+    }
     if (sync.ready && !sync.fatal) {
       updateSyncStatus('connecting', 'Back online — syncing…');
       scheduleFlush();
@@ -3968,6 +4219,10 @@ function bindEvents() {
     }
   });
   window.addEventListener('offline', () => {
+    if (sync.paused) {
+      updateSyncStatus('paused', SYNC_PAUSED_TEXT);
+      return;
+    }
     if (sync.ready) updateSyncStatus('offline', 'Offline — changes are saved locally and will sync when online.');
   });
 }
@@ -3982,6 +4237,8 @@ async function init() {
 
   bindEvents();
   redirectLegacyVoucherLink();
+  sync.paused = Boolean(metaGet('syncPaused'));
+  updateSyncControls();
 
   if (firebaseConfigured()) {
     updateSyncStatus('connecting', 'Checking owner sign-in…');

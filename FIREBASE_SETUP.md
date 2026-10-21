@@ -37,6 +37,8 @@ the other. Either URL can be installed as a PWA: open it in Chrome → menu →
    account with the custom claim `owner: true`.
 6. Deployed the site to Firebase Hosting.
 7. Published a copy to GitHub Pages and verified real cross-device sync.
+8. Vendored the Firebase Auth/Firestore SDK under `vendor/firebase/` so the
+   owner app can start offline without loading the SDK from Google's CDN.
 
 The owner login, Firestore rules and the public customer page are already
 configured. No further Firebase console work is required.
@@ -76,18 +78,37 @@ configured. No further Firebase console work is required.
 - The app can run offline all day. Sign in online once on each device; after
   that, reopening the app offline works because the login session and app files
   are cached on the device.
-- For a once-a-day sync, keep the phone offline during the day and reconnect
-  when you want to update. Queued sales, costs and edits upload automatically
-  when the connection returns.
-- Vouchers created while offline exist on the device immediately, but the public
-  verification page can verify them only after the device syncs. If a customer
-  needs to verify a voucher right away, connect once before handing it over.
+- Use **Settings → Cloud sync** to control syncing:
+  - **Pause cloud sync** stops Firestore uploads and detaches the listeners on
+    this device. Changes stay in the local outbox.
+  - **Sync now** (or **Resume & sync now** when paused) reconnects, uploads the
+    outbox, restarts the listeners and records the last sync time.
+- Pause is **per device** and survives a reload. If the same owner account is
+  signed in on a PC or a second phone, pause those devices too.
+- The app must be open to sync. Reconnecting the phone in the evening is not
+  enough; open the app and tap **Sync now**. There is no background sync while
+  the app is closed.
+- Vouchers created while offline or paused exist on the device immediately, but
+  the public verification page can verify them only after the device syncs. If a
+  customer needs to verify a voucher right away, connect once before handing it
+  over.
 - Do not sign out or clear the browser/site data while offline — signing in
-  again needs an internet connection.
+  again needs an internet connection, and clearing site data can delete
+  unsynced changes.
 - Use **Settings → Backup & Restore** for a JSON backup before big changes.
 - **History → 🧾 Costs** records stock purchases, the electric meter bill, gas
   bill and other expenses with a date. The same tab shows costs and real
   revenue (sales − costs) for today, this week, this month and all time.
+
+### Sync status
+
+| Status | Meaning |
+| --- | --- |
+| Green dot / "Synced with Firebase" | All four owner collections have a server snapshot on this device |
+| Blue dot / connecting | Starting, uploading or waiting for Firestore |
+| Amber dot / offline or limit reached | Local data is safe; sync will retry |
+| Violet dot / paused | This device is not syncing until you tap **Sync now** |
+| Red dot / sync blocked | Usually Firestore rules; redeploy `firestore.rules` and reload |
 
 ## Owner controls and history removal
 
@@ -183,6 +204,10 @@ firebase deploy --only firestore:rules
   vouchers. Voucher codes are random and were not designed to be secret, so
   treat the public verification page as a convenience check, not as proof of
   payment.
+- The owner app can sign a voucher with an HMAC key stored on that device. The
+  public page does **not** verify this signature; it only checks that the
+  `vouchers/{code}` document exists. Vouchers are also not marked as redeemed,
+  so a copied QR/code can be checked repeatedly.
 - The Firebase web config (API key, project ID) is public by design. Access is
   controlled by Authentication and the rules.
 - Do not store customer names, phone numbers or other sensitive data in this
@@ -220,7 +245,7 @@ Only needed if the Firebase project is ever deleted.
 
 | Symptom | Fix |
 | --- | --- |
-| Login screen says "Could not start the login service" | Reload. If it keeps failing, check the connection; the Firebase Auth SDK loads from `www.gstatic.com`. |
+| Login screen says "Could not start the login service" | Reload. The Auth SDK is bundled locally, but sign-in still needs to reach Google/Firebase. Check the connection or try another network. |
 | "This account is not the shop owner" | Sign in with the owner email, not another account. The owner account has the `owner: true` custom claim. |
 | "Wrong email or password" | Use **Forgot password?** on the login screen to reset the owner password by email. |
 | Dot stays grey / "Local only" | `firebase-config.js` is missing or invalid. |
@@ -228,12 +253,49 @@ Only needed if the Firebase project is ever deleted.
 | Public page says catalog unavailable | Check that Firestore rules allow public read on `catalog`, then reload. |
 | Old QR code opens the login screen | It should redirect to `shop.html#voucher=...` automatically. If not, open `shop.html` and type the code. |
 | "Firebase sync error" | Check the connection; local data is safe. Reload to reconnect. |
+| "Firestore limit reached" | The free daily quota or the 1 GiB storage limit is full. Data is safe locally. Wait for the daily reset (around 1:30–2:30 PM Myanmar time), free storage, or upgrade to Blaze. Then tap **Sync now**. |
+| Sync dot is violet / "Sync paused" | This device is paused. Open **Settings → Cloud sync** and tap **Resume & sync now**. Other devices may still be syncing. |
+| **Sync now** does nothing | It needs internet. Reconnect first; the button stays paused if the phone is offline. |
+| New voucher cannot be verified | The device has not synced the public `vouchers/{code}` document yet. Connect and tap **Sync now**; vouchers created while paused are not public until then. |
 | GitHub Pages shows an old version | Wait for the Pages build, then hard-reload. The service worker may serve a cached copy until `CACHE` is bumped. |
 | Firebase Hosting URL times out | Use the GitHub Pages URL instead. |
-| Barcode scan or image search fails | Those libraries load from a CDN, so the first use needs a connection. |
+| Barcode or voucher QR scan fails | Barcode and QR scanning use bundled libraries and work offline, but need camera permission. Image search is the part that needs internet: TensorFlow.js/MobileNet load from jsDelivr. |
 | Data appears twice | Export a backup, clear site data, then import the backup. |
 
-## Free tier
+## Free tier and limits
 
-Firestore Spark plan: 50,000 reads/day, 20,000 writes/day, 1 GB stored. More
-than enough for a small shop. There are no automatic charges on Spark.
+Firestore Spark plan, project-wide and shared by the owner app and public page:
+
+| Resource | Free quota |
+| --- | --- |
+| Stored data | 1 GiB |
+| Document reads | 50,000 / day |
+| Document writes | 20,000 / day |
+| Document deletes | 20,000 / day |
+| Outbound transfer | 10 GiB / month |
+
+Daily Firestore quotas reset around **midnight Pacific Time** — roughly
+**1:30 PM Myanmar time during US daylight saving**, otherwise about **2:30 PM**.
+They do not reset at Myanmar midnight.
+
+When a quota is full, Firestore does **not** delete data. Requests fail with
+`resource-exhausted`; the app keeps working locally and keeps writes in the
+outbox. The public catalog or voucher verification may be unavailable until the
+quota resets. The 1 GiB storage cap blocks new writes but generally still allows
+reads.
+
+Also relevant:
+
+- Firebase Auth email/password is free, with a 3,000 daily-active-user limit and
+  about 150 password-reset emails/day on Spark. For one owner this is not a
+  practical limit.
+- GitHub Pages has a 1 GiB site limit and a 100 GB/month soft bandwidth limit,
+  and its policy says it is not intended for commercial/e-commerce sites. This
+  site's runtime files are under 2 MB.
+- A phone with no free storage can fail to save local data. Export backups.
+
+For the full explanation, capacity estimates, upgrade notes and a recovery
+checklist, see [PROJECT.md §7](PROJECT.md#7-free-tier-limits-and-what-happens-when-a-limit-is-full).
+
+There are no automatic charges on Spark. Blaze is pay-as-you-go; budget alerts
+notify you but do not stop spending.
