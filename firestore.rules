@@ -20,6 +20,11 @@ service cloud.firestore {
       allow read, write: if isOwner();
     }
 
+    // Shop costs (stock purchases, electric, gas, rent…) are owner-only.
+    match /costs/{costId} {
+      allow read, write: if isOwner();
+    }
+
     // Customer-safe catalog: names, categories, prices and availability only.
     // Stock quantities are never written to this collection.
     match /catalog/{productId} {

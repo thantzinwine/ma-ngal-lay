@@ -880,7 +880,8 @@ body.cart-has-items main {
   margin-bottom: 13px;
 }
 
-.field input {
+.field input,
+.field select {
   display: block;
   width: 100%;
   margin-top: 6px;
@@ -895,7 +896,8 @@ body.cart-has-items main {
   transition: border-color .15s, box-shadow .15s;
 }
 
-.field input:focus {
+.field input:focus,
+.field select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.15);
 }
@@ -1286,6 +1288,36 @@ body.cart-has-items main {
   color: transparent;
   font-variant-numeric: tabular-nums;
 }
+
+.rev-card small {
+  font-size: 11.5px;
+  font-weight: 800;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+}
+
+.rev-card small.neg { color: var(--danger); }
+
+.cost-hint {
+  margin: 10px 2px 12px;
+  text-align: center;
+}
+
+.cost-dialog {
+  max-width: 380px;
+  text-align: left;
+}
+
+.cost-dialog h3 {
+  font-size: 18px;
+  font-weight: 800;
+  margin-bottom: 14px;
+}
+
+.cost-dialog .confirm-actions { margin-top: 4px; }
+
+.log-card .amt.cost-amt { color: var(--danger); }
 
 .log-list {
   display: flex;

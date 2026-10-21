@@ -12,7 +12,7 @@
   <link rel="stylesheet" href="fonts/fonts.css">
   <link rel="stylesheet" href="styles.css">
   <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
-  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js" defer></script>
+  <script src="vendor/html5-qrcode.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.1/dist/mobilenet.min.js" defer></script>
 </head>
@@ -114,6 +114,7 @@
     <section id="screen-history" class="screen">
       <div class="subtabs">
         <button data-htab="sales" class="active">💰 Sales</button>
+        <button data-htab="costs">🧾 Costs</button>
         <button data-htab="changes">📝 Changes</button>
       </div>
       <p class="owner-hint" id="ownerHint">🗑️ Tap a delete button to remove a history entry. Set a PIN in Settings to protect it.</p>
@@ -131,6 +132,18 @@
         <div class="log-list" id="dailyList"></div>
         <h3 class="section-title">Sales history</h3>
         <div class="log-list" id="salesList"></div>
+      </div>
+      <div id="history-costs" hidden>
+        <div class="rev-grid">
+          <div class="rev-card"><span>Costs Today</span><strong id="costToday">0 K</strong><small id="netToday">Real revenue 0 K</small></div>
+          <div class="rev-card"><span>Costs This Week</span><strong id="costWeek">0 K</strong><small id="netWeek">Real revenue 0 K</small></div>
+          <div class="rev-card"><span>Costs This Month</span><strong id="costMonth">0 K</strong><small id="netMonth">Real revenue 0 K</small></div>
+          <div class="rev-card"><span>Costs All Time</span><strong id="costAll">0 K</strong><small id="netAll">Real revenue 0 K</small></div>
+        </div>
+        <p class="about cost-hint">Real revenue = sales − costs. Record stock purchases, the electric meter bill, gas bill, rent, transport and other shop costs with their dates.</p>
+        <button id="addCostBtn" class="btn primary block" type="button">＋ Add cost</button>
+        <h3 class="section-title">Cost history</h3>
+        <div class="log-list" id="costsList"></div>
       </div>
       <div id="history-changes" hidden>
         <h3 class="section-title">Product add / edit history</h3>
@@ -339,6 +352,42 @@
           <button id="passwordSubmit" class="btn primary" type="submit">Update password</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <div class="sheet-backdrop center" id="costDialog" hidden>
+    <div class="confirm cost-dialog" role="dialog" aria-modal="true" aria-labelledby="costDialogTitle">
+      <h3 id="costDialogTitle">Add cost</h3>
+      <label class="field">What did you pay for?
+        <input id="costTitleInput" type="text" placeholder="e.g. Stock purchase — drinks" autocomplete="off">
+      </label>
+      <label class="field">Type
+        <select id="costCategory">
+          <option value="stock">Stock / goods purchase</option>
+          <option value="electric">Electric meter bill</option>
+          <option value="gas">Gas bill</option>
+          <option value="rent">Rent</option>
+          <option value="transport">Transport</option>
+          <option value="other">Other</option>
+        </select>
+      </label>
+      <div class="field-row">
+        <label class="field">Amount (MMK)
+          <input id="costAmount" type="text" inputmode="numeric" placeholder="15000">
+        </label>
+        <label class="field">Date
+          <input id="costDate" type="date">
+        </label>
+      </div>
+      <label class="field">Note (optional)
+        <input id="costNote" type="text" placeholder="optional" autocomplete="off">
+      </label>
+      <p class="form-error" id="costError" hidden></p>
+      <button id="costDeleteBtn" class="btn danger block" type="button" hidden>Delete cost</button>
+      <div class="confirm-actions">
+        <button id="costCancel" class="btn" type="button">Cancel</button>
+        <button id="costSave" class="btn primary" type="button">Save</button>
+      </div>
     </div>
   </div>
 

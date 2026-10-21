@@ -1,6 +1,6 @@
 /* Ma Ngal Lay — mini mart product book + POS
  * Local-first: IndexedDB is the source of truth on the device.
- * Optional cloud: Firebase Firestore syncs products / sales / changes.
+ * Optional cloud: Firebase Firestore syncs products / sales / changes / costs.
  */
 'use strict';
 
@@ -9,8 +9,17 @@ const FB_VERSION = '11.0.1';
 const CART_KEY = 'mnl-cart-v1';
 const META_PREFIX = 'mnl-meta-';
 const DB_NAME = 'ma-ngal-lay-app';
-const DB_VERSION = 1;
-const STORE_NAMES = ['products', 'sales', 'changes', 'outbox'];
+const DB_VERSION = 2;
+const STORE_NAMES = ['products', 'sales', 'changes', 'costs', 'outbox'];
+const SYNC_COLLECTIONS = ['products', 'sales', 'changes', 'costs'];
+const COST_CATEGORIES = [
+  { value: 'stock', label: 'Stock / goods purchase' },
+  { value: 'electric', label: 'Electric meter bill' },
+  { value: 'gas', label: 'Gas bill' },
+  { value: 'rent', label: 'Rent' },
+  { value: 'transport', label: 'Transport' },
+  { value: 'other', label: 'Other' }
+];
 const OWNER_META_KEY = 'ownerAuth';
 const OWNER_ITERATIONS = 150000;
 const OWNER_LOCK_MS = 10 * 60 * 1000;
@@ -30,6 +39,7 @@ const state = {
   products: [],
   sales: [],
   changes: [],
+  costs: [],
   cart: new Map(),
   search: '',
   cartSearch: '',
@@ -38,6 +48,7 @@ const state = {
   screen: 'products',
   historyTab: 'sales',
   editingId: null,
+  editingCostId: null,
   photoData: '',
   scanMode: null,
   ownerUnlocked: false,
@@ -766,6 +777,31 @@ function normalizeChange(raw) {
   return change;
 }
 
+function normalizeCost(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const createdAt = raw.createdAt || nowISO();
+  const category = COST_CATEGORIES.some((item) => item.value === raw.category) ? raw.category : 'other';
+  const amount = parseNumber(raw.amount);
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(String(raw.date || ''))
+    ? String(raw.date)
+    : dayKey(new Date(createdAt));
+  return {
+    id: raw.id ? String(raw.id) : uid(),
+    title: String(raw.title || '').trim() || costCategoryLabel(category),
+    category,
+    amount: Number.isFinite(amount) ? Math.max(0, amount) : 0,
+    date: day,
+    note: String(raw.note || '').trim(),
+    createdAt,
+    updatedAt: raw.updatedAt || createdAt
+  };
+}
+
+function costCategoryLabel(value) {
+  const found = COST_CATEGORIES.find((item) => item.value === value);
+  return found ? found.label : 'Other';
+}
+
 function normalizeCollection(name, rows) {
   const map = new Map();
   for (const raw of Array.isArray(rows) ? rows : []) {
@@ -773,11 +809,14 @@ function normalizeCollection(name, rows) {
     if (name === 'products') record = normalizeProduct(raw);
     else if (name === 'sales') record = normalizeSale(raw);
     else if (name === 'changes') record = normalizeChange(raw);
+    else if (name === 'costs') record = normalizeCost(raw);
     if (record) map.set(record.id, record);
   }
   const list = [...map.values()];
   if (name === 'products') {
     list.sort((a, b) => timeValue(a.createdAt) - timeValue(b.createdAt) || a.name.localeCompare(b.name));
+  } else if (name === 'costs') {
+    list.sort((a, b) => String(b.date).localeCompare(String(a.date)) || timeValue(b.createdAt) - timeValue(a.createdAt));
   } else {
     list.sort((a, b) => timeValue(b.createdAt) - timeValue(a.createdAt));
   }
@@ -1036,8 +1075,8 @@ function updateSyncFromMeta() {
     updateSyncStatus('connecting', 'Loading from the Firebase offline cache…');
     return;
   }
-  if (metas.length >= 3) {
-    updateSyncStatus('synced', 'Synced with Firebase — products, sales and changes are shared.');
+  if (metas.length >= SYNC_COLLECTIONS.length) {
+    updateSyncStatus('synced', 'Synced with Firebase — products, sales, costs and changes are shared.');
     if (!sync.announced) {
       sync.announced = true;
       toast('Cloud sync connected');
@@ -1096,7 +1135,7 @@ function handleSnapshot(name, snapshot) {
         Promise.all(queued).then(() => scheduleFlush());
       }
     }
-    if (!sync.seeded && sync.serverSnapshots.size >= 3) {
+    if (!sync.seeded && sync.serverSnapshots.size >= SYNC_COLLECTIONS.length) {
       sync.seeded = true;
       metaSet('fbSeeded', true);
       metaSet('fbSeededProject', window.FIREBASE_CONFIG.projectId);
@@ -1108,7 +1147,7 @@ function handleSnapshot(name, snapshot) {
   mirrorStore(name, state[name]);
   renderForCollection(name);
   if (!snapshot.metadata.fromCache) queuePublicDataDiff(name, local, state[name]);
-  if (firstServer && sync.serverSnapshots.size >= 3 && !sync.publicDataChecked) {
+  if (firstServer && sync.serverSnapshots.size >= SYNC_COLLECTIONS.length && !sync.publicDataChecked) {
     sync.publicDataChecked = true;
     ensurePublicDataVersion().catch((err) => console.warn('[public] could not publish public data', err));
   }
@@ -1500,20 +1539,17 @@ function lockShop() {
   state.products = [];
   state.sales = [];
   state.changes = [];
+  state.costs = [];
   state.cart.clear();
   renderAll();
 }
 
 async function loadLocalData() {
   try {
-    const [products, sales, changes] = await Promise.all([
-      storeAll('products'),
-      storeAll('sales'),
-      storeAll('changes')
-    ]);
-    state.products = normalizeCollection('products', products);
-    state.sales = normalizeCollection('sales', sales);
-    state.changes = normalizeCollection('changes', changes);
+    const rows = await Promise.all(SYNC_COLLECTIONS.map((name) => storeAll(name)));
+    SYNC_COLLECTIONS.forEach((name, index) => {
+      state[name] = normalizeCollection(name, rows[index]);
+    });
   } catch (err) {
     console.warn('[local] could not load data', err);
   }
@@ -1766,7 +1802,7 @@ function startFirebaseListeners() {
     try { unsubscribe(); } catch { /* already detached */ }
   }
   sync.unsubs = [];
-  for (const name of ['products', 'sales', 'changes']) {
+  for (const name of SYNC_COLLECTIONS) {
     const unsubscribe = sync.fs.onSnapshot(
       sync.fs.collection(sync.db, name),
       { includeMetadataChanges: true },
@@ -1781,7 +1817,7 @@ async function replaceCloudData() {
   if (!sync.ready || !sync.fs || !sync.db) return;
   sync.importing = true;
   try {
-    for (const name of ['products', 'sales', 'changes']) {
+    for (const name of SYNC_COLLECTIONS) {
       const records = state[name] || [];
       const keep = new Set(records.map((record) => record.id));
       const existing = await sync.fs.getDocs(sync.fs.collection(sync.db, name));
@@ -2291,6 +2327,190 @@ function renderHistory() {
     ))
     : [makeLogCard('No changes yet', 'Add, edit or delete a product to see it here.', '')]
   ));
+
+  renderCosts();
+}
+
+/* ------------------------------------------------------------------ */
+/* Costs (stock purchases, bills) and real revenue                     */
+/* ------------------------------------------------------------------ */
+
+function costTime(cost) {
+  const t = new Date(`${cost.date}T12:00:00`).getTime();
+  return Number.isFinite(t) ? t : timeValue(cost.createdAt);
+}
+
+function getCostSummary() {
+  const now = new Date();
+  const todayStart = startOfDay(now).getTime();
+  const weekStart = startOfWeek(now).getTime();
+  const monthStart = startOfMonth(now).getTime();
+  const summary = {
+    todayTotal: 0,
+    weekTotal: 0,
+    monthTotal: 0,
+    allTotal: 0,
+    todayCount: 0,
+    weekCount: 0,
+    monthCount: 0,
+    allCount: 0
+  };
+  for (const cost of state.costs) {
+    const t = costTime(cost);
+    const amount = Number(cost.amount) || 0;
+    summary.allTotal += amount;
+    summary.allCount += 1;
+    if (t >= todayStart) {
+      summary.todayTotal += amount;
+      summary.todayCount += 1;
+    }
+    if (t >= weekStart) {
+      summary.weekTotal += amount;
+      summary.weekCount += 1;
+    }
+    if (t >= monthStart) {
+      summary.monthTotal += amount;
+      summary.monthCount += 1;
+    }
+  }
+  return summary;
+}
+
+function renderCosts() {
+  const costs = getCostSummary();
+  const sales = getRevenue();
+
+  $('costToday').textContent = money(costs.todayTotal);
+  $('costWeek').textContent = money(costs.weekTotal);
+  $('costMonth').textContent = money(costs.monthTotal);
+  $('costAll').textContent = money(costs.allTotal);
+
+  const nets = [
+    ['netToday', sales.todayTotal - costs.todayTotal],
+    ['netWeek', sales.weekTotal - costs.weekTotal],
+    ['netMonth', sales.monthTotal - costs.monthTotal],
+    ['netAll', sales.allTotal - costs.allTotal]
+  ];
+  for (const [id, value] of nets) {
+    const node = $(id);
+    if (!node) continue;
+    node.textContent = `Real revenue ${money(value)}`;
+    node.classList.toggle('neg', value < 0);
+  }
+
+  const list = state.costs.slice(0, 200);
+  $('costsList').replaceChildren(...(list.length
+    ? list.map((cost) => {
+      const card = makeLogCard(
+        cost.title,
+        `${formatDay(cost.date)} · ${costCategoryLabel(cost.category)}${cost.note ? ` · ${cost.note}` : ''}`,
+        `− ${money(cost.amount)}`,
+        'cost-amt',
+        {
+          label: '🗑️',
+          title: `Remove ${cost.title}`,
+          onClick: () => deleteCostRecord(cost)
+        }
+      );
+      card.addEventListener('click', () => openCostEditor(cost.id));
+      return card;
+    })
+    : [makeLogCard('No costs recorded', 'Add stock purchases, the electric meter bill, gas bill and more to see real revenue.', '')]
+  ));
+}
+
+function showCostError(message) {
+  const node = $('costError');
+  if (!node) return;
+  node.textContent = message;
+  node.hidden = false;
+}
+
+function openCostEditor(id = null) {
+  const cost = id ? state.costs.find((row) => row.id === id) : null;
+  state.editingCostId = cost ? cost.id : null;
+  $('costDialogTitle').textContent = cost ? 'Edit cost' : 'Add cost';
+  $('costTitleInput').value = cost ? cost.title : '';
+  $('costCategory').value = cost ? cost.category : 'stock';
+  $('costAmount').value = cost ? String(Math.round(cost.amount)) : '';
+  $('costDate').value = cost ? cost.date : dayKey(new Date());
+  $('costNote').value = cost ? cost.note : '';
+  const error = $('costError');
+  error.hidden = true;
+  error.textContent = '';
+  $('costDeleteBtn').hidden = !cost;
+  showModal('costDialog');
+  setTimeout(() => $('costTitleInput').focus(), 80);
+}
+
+function closeCostDialog() {
+  hideModal('costDialog');
+  state.editingCostId = null;
+}
+
+async function saveCost() {
+  const titleInput = $('costTitleInput');
+  const title = titleInput.value.trim();
+  const category = $('costCategory').value;
+  const amount = parseNumber($('costAmount').value);
+  const date = $('costDate').value || dayKey(new Date());
+  const note = $('costNote').value.trim();
+
+  if (!title) {
+    showCostError('Enter what the cost was for.');
+    titleInput.focus();
+    return;
+  }
+  if (!Number.isFinite(amount) || amount <= 0) {
+    showCostError('Enter the amount in MMK (numbers only).');
+    $('costAmount').focus();
+    return;
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    showCostError('Choose the date of the cost.');
+    $('costDate').focus();
+    return;
+  }
+
+  const editing = state.editingCostId;
+  const existing = editing ? state.costs.find((row) => row.id === editing) : null;
+  const stamp = nowISO();
+  const record = {
+    id: existing ? existing.id : uid(),
+    title,
+    category,
+    amount: Math.round(amount),
+    date,
+    note,
+    createdAt: existing ? existing.createdAt : stamp,
+    updatedAt: stamp
+  };
+
+  if (existing) {
+    state.costs = state.costs.map((row) => (row.id === record.id ? record : row));
+  } else {
+    state.costs.unshift(record);
+  }
+  state.costs = normalizeCollection('costs', state.costs);
+  await persistRecord('costs', record);
+  scheduleFlush();
+  renderAll();
+  closeCostDialog();
+  toast(existing ? 'Cost updated' : 'Cost added');
+}
+
+async function deleteCostRecord(cost) {
+  if (!cost || !state.costs.some((row) => row.id === cost.id)) return;
+  const ok = await askConfirm(
+    `Remove this cost of ${money(cost.amount)} (${cost.title})? Real revenue will be recalculated.`
+  );
+  if (!ok) return;
+
+  state.costs = state.costs.filter((row) => row.id !== cost.id);
+  await persistDelete('costs', cost.id);
+  scheduleFlush();
+  renderAll();
+  toast('Cost removed');
 }
 
 async function deleteSaleRecord(sale) {
@@ -3198,7 +3418,8 @@ function exportBackup() {
     exportedAt: nowISO(),
     products: state.products,
     sales: state.sales,
-    changes: state.changes
+    changes: state.changes,
+    costs: state.costs
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -3228,14 +3449,16 @@ async function importBackupFile(file) {
   const products = normalizeCollection('products', payload.products);
   const sales = normalizeCollection('sales', Array.isArray(payload.sales) ? payload.sales : []);
   const changes = normalizeCollection('changes', Array.isArray(payload.changes) ? payload.changes : []);
+  const costs = normalizeCollection('costs', Array.isArray(payload.costs) ? payload.costs : []);
   const confirmed = await askConfirm(
-    `Replace all current data with this backup? ${products.length} product${products.length === 1 ? '' : 's'} and ${sales.length} sale${sales.length === 1 ? '' : 's'} will be restored.`
+    `Replace all current data with this backup? ${products.length} product${products.length === 1 ? '' : 's'}, ${sales.length} sale${sales.length === 1 ? '' : 's'} and ${costs.length} cost entr${costs.length === 1 ? 'y' : 'ies'} will be restored.`
   );
   if (!confirmed) return;
 
   state.products = products;
   state.sales = sales;
   state.changes = changes;
+  state.costs = costs;
   invalidateRevenue();
   state.cart.clear();
   state.search = '';
@@ -3251,6 +3474,7 @@ async function importBackupFile(file) {
   await storeReplace('products', products);
   await storeReplace('sales', sales);
   await storeReplace('changes', changes);
+  await storeReplace('costs', costs);
   await storeClear('outbox');
 
   const importChange = {
@@ -3258,7 +3482,7 @@ async function importBackupFile(file) {
     type: 'import',
     productId: '',
     name: 'Backup restored',
-    detail: `${products.length} products · ${sales.length} sales`,
+    detail: `${products.length} products · ${sales.length} sales · ${costs.length} costs`,
     createdAt: nowISO()
   };
   state.changes.unshift(importChange);
@@ -3645,9 +3869,23 @@ function bindEvents() {
         button.classList.toggle('active', button.dataset.htab === state.historyTab);
       }
       $('history-sales').hidden = state.historyTab !== 'sales';
+      $('history-costs').hidden = state.historyTab !== 'costs';
       $('history-changes').hidden = state.historyTab !== 'changes';
+      if (state.historyTab === 'costs') renderCosts();
     });
   }
+
+  $('addCostBtn').addEventListener('click', () => openCostEditor());
+  $('costSave').addEventListener('click', saveCost);
+  $('costCancel').addEventListener('click', closeCostDialog);
+  $('costDeleteBtn').addEventListener('click', () => {
+    const cost = state.costs.find((row) => row.id === state.editingCostId);
+    closeCostDialog();
+    if (cost) deleteCostRecord(cost);
+  });
+  $('costDialog').addEventListener('click', (event) => {
+    if (event.target === $('costDialog')) closeCostDialog();
+  });
 
   $('exportBtn').addEventListener('click', exportBackup);
   $('importBtn').addEventListener('click', () => $('importFile').click());
@@ -3692,6 +3930,7 @@ function bindEvents() {
     if (event.key !== 'Escape') return;
     if (!$('passwordDialog').hidden) closePasswordDialog();
     else if (!$('pinDialog').hidden) closePinDialog(null);
+    else if (!$('costDialog').hidden) closeCostDialog();
     else if (!$('voucherDialog').hidden) closeVoucherDialog();
     else if (!$('verifyDialog').hidden) closeVerifyDialog();
     else if (!$('checkoutDialog').hidden) closeCheckoutDialog();

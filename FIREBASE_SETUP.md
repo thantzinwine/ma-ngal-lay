@@ -30,9 +30,9 @@ the other. Either URL can be installed as a PWA: open it in Chrome → menu →
 2. Created the Firestore database in `asia-southeast1` (Singapore).
 3. Registered the web app `ministore` and copied its config into
    `firebase-config.js`.
-4. Published `firestore.rules`. `products`, `sales` and `changes` are
-   owner-only; `catalog` is public read-only; `vouchers` can be fetched one
-   code at a time and cannot be listed.
+4. Published `firestore.rules`. `products`, `sales`, `changes` and `costs`
+   are owner-only; `catalog` is public read-only; `vouchers` can be fetched
+   one code at a time and cannot be listed.
 5. Enabled Firebase Authentication (Email/Password) and created the owner
    account with the custom claim `owner: true`.
 6. Deployed the site to Firebase Hosting.
@@ -51,9 +51,11 @@ configured. No further Firebase console work is required.
 - The shop manager requires the owner email and password. The owner account has
   the Firebase Auth custom claim `owner: true`; Firestore rules check that
   claim, so a normal signed-in user still cannot read or change shop data.
-- The public page never reads `products`, `sales` or `changes`. It reads a
-  sanitized `catalog` collection (no stock quantities and no stock value) and
-  individual `vouchers/{code}` documents.
+- The public page never reads `products`, `sales`, `changes` or `costs`. It
+  reads a sanitized `catalog` collection (no stock quantities and no stock
+  value) and individual `vouchers/{code}` documents.
+- Customers can verify a voucher by scanning its QR code with the camera or by
+  typing the code. Both methods check the same `vouchers/{code}` document.
 - New voucher QRs open `shop.html#voucher=CODE`. Old printed QRs that point at
   `index.html#voucher=CODE` are automatically redirected to the public page.
 - Customers cannot list vouchers: rules allow a single `get` by code but deny
@@ -65,13 +67,16 @@ configured. No further Firebase console work is required.
 ## Day-to-day use
 
 - Open either live URL on the shop phone and PC.
-- On first connect, local products/sales/changes are uploaded to Firestore if
-  the cloud copy is empty.
-- Every add/edit/delete, sale, and change-log entry is saved to IndexedDB
+- On first connect, local products/sales/changes/costs are uploaded to
+  Firestore if the cloud copy is empty.
+- Every add/edit/delete, sale, cost and change-log entry is saved to IndexedDB
   first, then synced to Firestore.
 - Offline use is fully supported. Pending writes are queued and sent when the
   connection returns.
 - Use **Settings → Backup & Restore** for a JSON backup before big changes.
+- **History → 🧾 Costs** records stock purchases, the electric meter bill, gas
+  bill and other expenses with a date. The same tab shows costs and real
+  revenue (sales − costs) for today, this week, this month and all time.
 
 ## Owner controls and history removal
 
@@ -132,6 +137,7 @@ service cloud.firestore {
     match /products/{productId} { allow read, write: if isOwner(); }
     match /sales/{saleId}       { allow read, write: if isOwner(); }
     match /changes/{changeId}   { allow read, write: if isOwner(); }
+    match /costs/{costId}       { allow read, write: if isOwner(); }
 
     match /catalog/{productId} {
       allow read: if true;
@@ -140,7 +146,7 @@ service cloud.firestore {
 
     match /vouchers/{voucherCode} {
       allow get: if true;
-      allow list: if false;
+      allow list: if isOwner();
       allow write: if isOwner();
     }
 
@@ -157,8 +163,8 @@ firebase deploy --only firestore:rules
 
 ## Security notes
 
-- `products`, `sales` and `changes` now require the `owner: true` custom claim.
-  A signed-in account without that claim is rejected by Firestore.
+- `products`, `sales`, `changes` and `costs` require the `owner: true` custom
+  claim. A signed-in account without that claim is rejected by Firestore.
 - `catalog` is intended to be public: it contains only product name, category,
   price, photo and availability. Stock quantities are never written there.
 - `vouchers/{code}` contains the code, date, items and total for one purchase.

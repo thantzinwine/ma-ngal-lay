@@ -476,6 +476,23 @@ button { cursor: pointer; }
 
 .btn:disabled { opacity: .6; cursor: not-allowed; transform: none; }
 
+.scan-btn { width: 100%; margin-bottom: 12px; }
+
+.voucher-scan-frame {
+  margin: 0 0 12px;
+  border-radius: 14px;
+  overflow: hidden;
+  background: #0b1a12;
+  min-height: 220px;
+}
+
+.voucher-scan-frame video {
+  display: block;
+  width: 100% !important;
+  height: auto !important;
+  border-radius: 14px;
+}
+
 .form-error {
   background: var(--danger-soft);
   color: var(--danger);

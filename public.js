@@ -14,6 +14,9 @@ let allProducts = [];
 let activeCategory = 'all';
 let searchTerm = '';
 let verifyToken = 0;
+let scanner = null;
+let scannerRunning = false;
+let scanToken = 0;
 
 const $ = (id) => document.getElementById(id);
 
@@ -210,6 +213,87 @@ function clearVerifyResult() {
   if (result) result.hidden = true;
 }
 
+function showVerifyError(message) {
+  const error = $('verifyError');
+  if (!error) return;
+  error.textContent = message;
+  error.hidden = false;
+}
+
+async function startVoucherScanner() {
+  const holder = $('voucherScanner');
+  const button = $('scanVoucherBtn');
+  if (!holder || !button) return;
+
+  if (!window.Html5Qrcode) {
+    showVerifyError('The QR scanner did not load. Type the code instead, or check your internet connection.');
+    return;
+  }
+
+  clearVerifyResult();
+  holder.hidden = false;
+  holder.replaceChildren();
+  const token = ++scanToken;
+  button.textContent = '✕ Stop camera';
+
+  try {
+    const instance = new window.Html5Qrcode('voucherScanner', { verbose: false });
+    scanner = instance;
+    await instance.start(
+      { facingMode: 'environment' },
+      { fps: 10, qrbox: { width: 240, height: 200 } },
+      (decodedText) => handleVoucherScan(decodedText),
+      () => { /* per-frame decode errors are normal */ }
+    );
+    if (token !== scanToken) {
+      // The scanner was stopped while the camera was starting.
+      try { await instance.stop(); } catch { /* ignore */ }
+      try { instance.clear(); } catch { /* ignore */ }
+      return;
+    }
+    scannerRunning = true;
+  } catch (err) {
+    console.warn('[public] could not start scanner', err);
+    if (token === scanToken) {
+      showVerifyError('Could not start the camera. Allow camera access for this page, or type the code.');
+      stopVoucherScanner();
+    }
+  }
+}
+
+async function stopVoucherScanner() {
+  scanToken += 1;
+  const instance = scanner;
+  scanner = null;
+  scannerRunning = false;
+
+  if (instance) {
+    try { await instance.stop(); } catch { /* already stopped */ }
+    try { instance.clear(); } catch { /* already cleared */ }
+  }
+
+  const holder = $('voucherScanner');
+  if (holder) {
+    holder.hidden = true;
+    holder.replaceChildren();
+  }
+  const button = $('scanVoucherBtn');
+  if (button) button.textContent = '📷 Scan QR instead';
+}
+
+function handleVoucherScan(decodedText) {
+  if (!scanner) return;
+  const code = extractCode(decodedText);
+  stopVoucherScanner();
+  if (!code) {
+    showVerifyError('That QR code is not a Ma Ngal Lay voucher.');
+    return;
+  }
+  const input = $('voucherInput');
+  if (input) input.value = code;
+  verifyVoucher(code);
+}
+
 function renderVoucher(data, fallbackCode) {
   const result = $('verifyResult');
   if (!result) return;
@@ -282,6 +366,7 @@ async function verifyVoucher(raw) {
 function openVerify(prefill = '') {
   const modal = $('verifyModal');
   if (!modal) return;
+  stopVoucherScanner();
   clearVerifyResult();
   modal.hidden = false;
   const input = $('voucherInput');
@@ -291,6 +376,7 @@ function openVerify(prefill = '') {
 }
 
 function closeVerify() {
+  stopVoucherScanner();
   const modal = $('verifyModal');
   if (modal) modal.hidden = true;
   verifyToken += 1;
@@ -312,6 +398,10 @@ function readHashCode() {
 
 function bindVerifyControls() {
   $('openVerifyBtn').addEventListener('click', () => openVerify(''));
+  $('scanVoucherBtn').addEventListener('click', () => {
+    if (scannerRunning || scanner) stopVoucherScanner();
+    else startVoucherScanner();
+  });
   $('closeVerifyBtn').addEventListener('click', closeVerify);
   $('verifyModal').addEventListener('click', (event) => {
     if (event.target === $('verifyModal')) closeVerify();
