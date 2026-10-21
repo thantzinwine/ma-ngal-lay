@@ -1,10 +1,11 @@
-const CACHE = 'ma-ngal-lay-v10';
+const CACHE = 'ma-ngal-lay-v11';
 
 const ASSETS = [
   './',
   './index.html',
   './styles.css',
   './app.js',
+  './vendor/qrcode.min.js',
   './firebase-config.js',
   './manifest.json',
   './icons/icon.svg',

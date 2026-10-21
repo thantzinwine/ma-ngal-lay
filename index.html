@@ -82,7 +82,10 @@
           <span class="total-label">TOTAL</span>
         </div>
         <div class="total" id="cartTotal">0 K</div>
-        <button id="checkoutBtn" class="btn primary big">Complete Sale</button>
+        <div class="cart-actions">
+          <button id="cancelBillBtn" class="btn danger big" type="button">Cancel</button>
+          <button id="checkoutBtn" class="btn primary big" type="button">Complete Sale</button>
+        </div>
       </div>
     </section>
 
@@ -93,6 +96,9 @@
       </div>
       <p class="owner-hint" id="ownerHint">🗑️ Tap a delete button to remove a history entry. Set a PIN in Settings to protect it.</p>
       <div id="history-sales">
+        <div class="voucher-verify-bar">
+          <button id="verifyVoucherBtn" class="btn block" type="button">🔎 Verify a voucher</button>
+        </div>
         <div class="rev-grid">
           <div class="rev-card"><span>Today</span><strong id="revToday">0 K</strong></div>
           <div class="rev-card"><span>This Week</span><strong id="revWeek">0 K</strong></div>
@@ -229,6 +235,45 @@
     </div>
   </div>
 
+  <div class="sheet-backdrop center" id="voucherDialog" hidden>
+    <div class="confirm voucher-dialog" role="dialog" aria-modal="true" aria-labelledby="voucherTitle">
+      <div class="voucher-shop">Ma Ngal Lay</div>
+      <h3 id="voucherTitle">Sale complete</h3>
+      <p class="voucher-status" id="voucherStatus" hidden></p>
+      <div class="voucher-code" id="voucherCode">MNL-000000-0000-0000-0000-0000</div>
+      <p class="voucher-meta" id="voucherMeta"></p>
+      <div class="voucher-qr" id="voucherQr"></div>
+      <div class="voucher-lines" id="voucherItems"></div>
+      <div class="voucher-total-row">
+        <span>TOTAL</span>
+        <strong id="voucherTotal">0 K</strong>
+      </div>
+      <p class="voucher-payment" id="voucherPayment" hidden></p>
+      <p class="voucher-note" id="voucherNote">Scan the QR code to verify this voucher.</p>
+      <div class="confirm-actions">
+        <button id="voucherPrintBtn" class="btn" type="button">🖨️ Print</button>
+        <button id="voucherCloseBtn" class="btn primary" type="button">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="sheet-backdrop center" id="verifyDialog" hidden>
+    <div class="confirm verify-dialog" role="dialog" aria-modal="true" aria-labelledby="verifyTitle">
+      <h3 id="verifyTitle">Verify voucher</h3>
+      <p class="about">Enter the code printed on the voucher.</p>
+      <form id="verifyForm" autocomplete="off">
+        <label class="field">Voucher code
+          <input id="verifyCodeInput" type="text" placeholder="MNL-XXXXXX-XXXX-XXXX-XXXX-XXXX" autocomplete="off">
+        </label>
+        <p class="form-error" id="verifyError" hidden></p>
+        <div class="confirm-actions">
+          <button id="verifyCancel" class="btn" type="button">Cancel</button>
+          <button id="verifySubmit" class="btn primary" type="submit">Verify</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div class="sheet-backdrop center" id="pinDialog" hidden>
     <div class="confirm pin-dialog" role="dialog" aria-modal="true" aria-labelledby="pinTitle">
       <h3 id="pinTitle">Owner access</h3>
@@ -274,6 +319,7 @@
   </div>
 
   <!-- Firebase config is optional: the app stays local-only until it is filled in. -->
+  <script src="vendor/qrcode.min.js"></script>
   <script src="firebase-config.js"></script>
   <script src="app.js"></script>
 </body>

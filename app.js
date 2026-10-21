@@ -14,6 +14,9 @@ const STORE_NAMES = ['products', 'sales', 'changes', 'outbox'];
 const OWNER_META_KEY = 'ownerAuth';
 const OWNER_ITERATIONS = 150000;
 const OWNER_LOCK_MS = 10 * 60 * 1000;
+const VOUCHER_KEY_META = 'voucherHmacKey';
+const VOUCHER_KEY_ID_META = 'voucherHmacKeyId';
+const VOUCHER_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 /* ------------------------------------------------------------------ */
 /* State                                                               */
@@ -68,6 +71,10 @@ let pinBusy = false;
 let pinFailures = 0;
 let pinBlockedUntil = 0;
 let ownerLockTimer = null;
+let voucherKeyPromise = null;
+let currentVoucherSale = null;
+let voucherHashTimer = null;
+let voucherHashHandled = false;
 
 // Revenue is aggregated once per sales change, never during rendering.
 const revenue = {
@@ -713,15 +720,25 @@ function normalizeSale(raw) {
     .filter((item) => item.qty > 0);
   const computed = items.reduce((sum, item) => sum + item.price * item.qty, 0);
   const total = parseNumber(raw.total);
-  return {
+  const sale = {
     id: raw.id ? String(raw.id) : uid(),
     items,
     total: Number.isFinite(total) ? Math.max(0, total) : computed,
     count: Number.isFinite(Number(raw.count))
       ? Math.max(0, Math.floor(Number(raw.count)))
       : items.reduce((sum, item) => sum + item.qty, 0),
-    createdAt: raw.createdAt || nowISO()
+    createdAt: raw.createdAt || nowISO(),
+    voucherCode: String(raw.voucherCode || '').trim(),
+    voucherSig: String(raw.voucherSig || '').trim(),
+    voucherKeyId: String(raw.voucherKeyId || '').trim()
   };
+  const paid = parseNumber(raw.paid);
+  if (Number.isFinite(paid)) {
+    sale.paid = Math.max(0, paid);
+    const change = parseNumber(raw.change);
+    sale.change = Number.isFinite(change) ? Math.max(0, change) : Math.max(0, sale.paid - sale.total);
+  }
+  return sale;
 }
 
 function normalizeChange(raw) {
@@ -1093,6 +1110,7 @@ function mirrorStore(name, records) {
 }
 
 function renderForCollection(name) {
+  if (name === 'sales') handleVoucherHash();
   if (name === 'products') {
     pruneCart();
     renderCategoryDatalist();
@@ -1604,12 +1622,16 @@ function makeLogCard(title, subtitle, rightText, rightClass = '', action = null)
   rightWrap.append(right);
 
   if (action) {
-    const button = createButton(action.label || '🗑️', 'log-del', action.title || 'Remove');
-    button.addEventListener('click', (event) => {
-      event.stopPropagation();
-      action.onClick();
-    });
-    rightWrap.append(button);
+    const actions = Array.isArray(action) ? action : [action];
+    for (const item of actions) {
+      if (!item) continue;
+      const button = createButton(item.label || '🗑️', item.className || 'log-del', item.title || 'Remove');
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        item.onClick();
+      });
+      rightWrap.append(button);
+    }
   }
 
   card.append(left, rightWrap);
@@ -1647,16 +1669,28 @@ function renderHistory() {
       const itemNames = saleItemSummary(sale);
       const count = Number(sale.count) || 0;
       const title = `${count} item${count === 1 ? '' : 's'}`;
+      const voucherText = sale.voucherCode ? ` · Voucher ${sale.voucherCode}` : '';
       return makeLogCard(
         title,
-        `${formatDateTime(sale.createdAt)}${itemNames ? ` · ${itemNames}` : ''}`,
+        `${formatDateTime(sale.createdAt)}${voucherText}${itemNames ? ` · ${itemNames}` : ''}`,
         money(sale.total),
         '',
-        {
-          label: '🗑️',
-          title: `Remove this sale of ${money(sale.total)}`,
-          onClick: () => deleteSaleRecord(sale)
-        }
+        [
+          sale.voucherCode
+            ? {
+              label: '🎫',
+              className: 'log-del log-view',
+              title: `View voucher ${sale.voucherCode}`,
+              onClick: () => showVoucher(sale, { mode: 'history' })
+            }
+            : null,
+          {
+            label: '🗑️',
+            className: 'log-del',
+            title: `Remove this sale of ${money(sale.total)}`,
+            onClick: () => deleteSaleRecord(sale)
+          }
+        ]
       );
     })
     : [makeLogCard('No sales yet', 'Complete a sale from the Bill tab.', '')]
@@ -1992,6 +2026,417 @@ async function deleteEditingProduct() {
 }
 
 /* ------------------------------------------------------------------ */
+/* Purchase vouchers                                                   */
+/* ------------------------------------------------------------------ */
+
+function secureRandomBytes(length) {
+  const bytes = new Uint8Array(length);
+  if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+    window.crypto.getRandomValues(bytes);
+    return bytes;
+  }
+  for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+  return bytes;
+}
+
+function bytesToHex(bytes) {
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function hexToBytes(hex) {
+  const clean = String(hex || '').replace(/[^0-9a-f]/gi, '');
+  if (!clean || clean.length % 2) return new Uint8Array();
+  const bytes = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < bytes.length; i += 1) {
+    bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+function cleanVoucherCode(value) {
+  return String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function makeVoucherCode(when = new Date()) {
+  const stamp = dayKey(when).replace(/-/g, '').slice(2);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const bytes = secureRandomBytes(16);
+    let token = '';
+    for (const byte of bytes) token += VOUCHER_ALPHABET[byte % VOUCHER_ALPHABET.length];
+    const code = `MNL-${stamp}-${token.slice(0, 4)}-${token.slice(4, 8)}-${token.slice(8, 12)}-${token.slice(12, 16)}`;
+    const cleaned = cleanVoucherCode(code);
+    if (!state.sales.some((sale) => cleanVoucherCode(sale.voucherCode) === cleaned)) return code;
+  }
+  return `MNL-${stamp}-${Date.now().toString(36).toUpperCase()}`;
+}
+
+async function getVoucherKey() {
+  if (!voucherKeyPromise) {
+    voucherKeyPromise = (async () => {
+      if (!window.crypto || !window.crypto.subtle) {
+        throw new Error('Voucher signing needs HTTPS or localhost');
+      }
+      let raw = metaGet(VOUCHER_KEY_META);
+      let keyBytes;
+      if (typeof raw === 'string' && raw) {
+        try {
+          keyBytes = base64ToBytes(raw);
+        } catch {
+          keyBytes = null;
+        }
+      }
+      if (!keyBytes || !keyBytes.length) {
+        keyBytes = secureRandomBytes(32);
+        raw = bytesToBase64(keyBytes);
+        metaSet(VOUCHER_KEY_META, raw);
+      }
+      const key = await crypto.subtle.importKey(
+        'raw',
+        keyBytes,
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign', 'verify']
+      );
+      const digest = await crypto.subtle.digest('SHA-256', keyBytes);
+      const keyId = bytesToHex(new Uint8Array(digest).slice(0, 4));
+      metaSet(VOUCHER_KEY_ID_META, keyId);
+      return { key, keyId };
+    })();
+    voucherKeyPromise.catch(() => { voucherKeyPromise = null; });
+  }
+  return voucherKeyPromise;
+}
+
+function voucherPayload(sale) {
+  const items = (sale.items || [])
+    .map((item) => `${item.productId}|${item.qty}|${item.price}`)
+    .join(';');
+  return [
+    'MNL-VOUCHER-1',
+    cleanVoucherCode(sale.voucherCode),
+    sale.id || '',
+    sale.createdAt || '',
+    String(sale.total == null ? 0 : sale.total),
+    String(sale.count == null ? 0 : sale.count),
+    sale.paid == null ? '' : String(sale.paid),
+    sale.change == null ? '' : String(sale.change),
+    sale.voucherKeyId || '',
+    items
+  ].join('|');
+}
+
+async function issueVoucher(sale) {
+  sale.voucherCode = makeVoucherCode(new Date(sale.createdAt || Date.now()));
+  try {
+    const { key, keyId } = await getVoucherKey();
+    sale.voucherKeyId = keyId;
+    const signature = await crypto.subtle.sign(
+      'HMAC',
+      key,
+      new TextEncoder().encode(voucherPayload(sale))
+    );
+    sale.voucherSig = bytesToHex(new Uint8Array(signature));
+  } catch (err) {
+    console.warn('[voucher] could not sign the voucher', err);
+    sale.voucherSig = '';
+    sale.voucherKeyId = '';
+  }
+  return sale;
+}
+
+async function voucherSignatureStatus(sale) {
+  if (!sale || !sale.voucherSig || !sale.voucherKeyId) return 'record';
+  if (!window.crypto || !window.crypto.subtle) return 'record';
+  const localKeyId = metaGet(VOUCHER_KEY_ID_META);
+  if (!localKeyId || localKeyId !== sale.voucherKeyId) return 'other';
+  try {
+    const { key } = await getVoucherKey();
+    const signature = hexToBytes(sale.voucherSig);
+    if (!signature.length) return 'bad';
+    const ok = await crypto.subtle.verify(
+      'HMAC',
+      key,
+      signature,
+      new TextEncoder().encode(voucherPayload(sale))
+    );
+    return ok ? 'verified' : 'bad';
+  } catch {
+    return 'record';
+  }
+}
+
+function findSaleByVoucher(value) {
+  const code = cleanVoucherCode(value);
+  if (!code) return null;
+  return state.sales.find((sale) => sale.voucherCode && cleanVoucherCode(sale.voucherCode) === code) || null;
+}
+
+function voucherVerifyUrl(code) {
+  if (!code) return '';
+  const base = location.origin && location.origin !== 'null'
+    ? `${location.origin}${location.pathname}`
+    : '';
+  return base ? `${base}#voucher=${encodeURIComponent(code)}` : code;
+}
+
+function renderVoucherQr(text) {
+  const node = $('voucherQr');
+  if (!node) return;
+  node.replaceChildren();
+  if (typeof QRCode === 'undefined') {
+    node.hidden = true;
+    return;
+  }
+  node.hidden = false;
+  try {
+    new QRCode(node, {
+      text,
+      width: 172,
+      height: 172,
+      colorDark: '#12211a',
+      colorLight: '#ffffff',
+      correctLevel: QRCode.CorrectLevel.M
+    });
+  } catch (err) {
+    console.warn('[voucher] could not draw the QR code', err);
+    node.hidden = true;
+  }
+}
+
+function voucherQrDataUrl() {
+  const node = $('voucherQr');
+  if (!node) return '';
+  const canvas = node.querySelector('canvas');
+  if (canvas) {
+    try { return canvas.toDataURL('image/png'); } catch { /* fall through */ }
+  }
+  const image = node.querySelector('img');
+  return image && image.src ? image.src : '';
+}
+
+function showVoucher(sale, options = {}) {
+  if (!sale || !sale.voucherCode) {
+    toast('No voucher for this sale');
+    return;
+  }
+  currentVoucherSale = sale;
+  const mode = options.mode || 'sale';
+
+  $('voucherTitle').textContent = mode === 'verify'
+    ? 'Voucher verified'
+    : mode === 'sale'
+      ? 'Sale complete'
+      : 'Purchase voucher';
+  $('voucherCode').textContent = sale.voucherCode;
+
+  const count = Number(sale.count) || 0;
+  $('voucherMeta').textContent = `${formatDateTime(sale.createdAt)} · ${count} item${count === 1 ? '' : 's'}`;
+
+  const lines = (sale.items || []).map((item) => {
+    const line = document.createElement('div');
+    line.className = 'voucher-line';
+    const name = document.createElement('span');
+    name.className = 'voucher-line-name';
+    name.textContent = `${item.qty}× ${item.name}`;
+    const amount = document.createElement('strong');
+    amount.textContent = money(item.price * item.qty);
+    line.append(name, amount);
+    return line;
+  });
+  $('voucherItems').replaceChildren(...lines);
+
+  $('voucherTotal').textContent = money(sale.total);
+
+  const payment = $('voucherPayment');
+  if (Number.isFinite(sale.paid)) {
+    const change = Number.isFinite(sale.change) ? sale.change : Math.max(0, sale.paid - sale.total);
+    payment.textContent = `Received ${money(sale.paid)} · Change ${money(change)}`;
+    payment.hidden = false;
+  } else {
+    payment.hidden = true;
+    payment.textContent = '';
+  }
+
+  const statusNode = $('voucherStatus');
+  const status = options.status || '';
+  statusNode.className = 'voucher-status';
+  statusNode.hidden = !status;
+  if (status === 'verified') {
+    statusNode.textContent = '🔐 Valid — signature verified on this device.';
+    statusNode.classList.add('ok');
+  } else if (status === 'other') {
+    statusNode.textContent = '✅ Valid — found in synced sales (issued on another device).';
+    statusNode.classList.add('ok');
+  } else if (status === 'record') {
+    statusNode.textContent = '✅ Valid — found in sales history.';
+    statusNode.classList.add('ok');
+  } else if (status === 'signed') {
+    statusNode.textContent = '🔐 Signed — unique voucher code issued.';
+    statusNode.classList.add('ok');
+  } else if (status === 'bad') {
+    statusNode.textContent = '⚠ Signature mismatch — check this voucher with the owner.';
+    statusNode.classList.add('warn');
+  }
+
+  $('voucherNote').textContent = mode === 'verify'
+    ? 'This voucher matches the shop sales record.'
+    : mode === 'sale'
+      ? 'Sale saved. Scan the QR code to verify this voucher.'
+      : 'Scan the QR code to verify this voucher.';
+
+  renderVoucherQr(voucherVerifyUrl(sale.voucherCode));
+  showModal('voucherDialog');
+}
+
+function closeVoucherDialog() {
+  currentVoucherSale = null;
+  hideModal('voucherDialog');
+  if (location.hash.includes('voucher=')) {
+    history.replaceState(null, '', location.pathname + location.search);
+  }
+}
+
+function escapeHtml(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  })[ch]);
+}
+
+function printVoucher() {
+  const sale = currentVoucherSale;
+  if (!sale) return;
+  const qr = voucherQrDataUrl();
+  const url = voucherVerifyUrl(sale.voucherCode);
+  const rows = (sale.items || []).map((item) => `
+    <div class="row">
+      <span class="name">${item.qty}× ${escapeHtml(item.name)}</span>
+      <span>${money(item.price * item.qty)}</span>
+    </div>
+  `).join('');
+  const payment = Number.isFinite(sale.paid)
+    ? `<div class="row"><span class="name">Received</span><span>${money(sale.paid)}</span></div>
+       <div class="row"><span class="name">Change</span><span>${money(Number.isFinite(sale.change) ? sale.change : Math.max(0, sale.paid - sale.total))}</span></div>`
+    : '';
+
+  const win = window.open('', '_blank');
+  if (!win) {
+    toast('Allow pop-ups to print the voucher');
+    return;
+  }
+  win.document.write(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${escapeHtml(sale.voucherCode)}</title>
+  <style>
+    @page { margin: 3mm; }
+    * { box-sizing: border-box; }
+    body { width: 52mm; margin: 0 auto; color: #000; font-family: "Segoe UI", Arial, sans-serif; font-size: 10.5px; }
+    .shop { font-size: 17px; font-weight: 800; text-align: center; margin: 2mm 0 1mm; }
+    h1 { font-size: 11px; text-align: center; margin: 0 0 2mm; letter-spacing: .5px; text-transform: uppercase; }
+    .code { font-family: Consolas, monospace; font-size: 10px; font-weight: 700; text-align: center; word-break: break-all; margin: 1mm 0 2mm; }
+    .qr { display: block; width: 38mm; height: 38mm; margin: 1mm auto 2mm; }
+    .meta { text-align: center; font-size: 9px; margin: 0 0 2mm; }
+    hr { border: 0; border-top: 1px dashed #000; margin: 2mm 0; }
+    .row { display: flex; justify-content: space-between; gap: 2mm; margin: 1mm 0; }
+    .row .name { flex: 1; }
+    .total { display: flex; justify-content: space-between; font-size: 13px; font-weight: 800; margin-top: 2mm; }
+    .note { font-size: 8px; text-align: center; margin-top: 2mm; word-break: break-all; }
+    .no-print { text-align: center; margin-top: 4mm; }
+    @media print { .no-print { display: none; } }
+  </style>
+</head>
+<body>
+  <div class="shop">Ma Ngal Lay</div>
+  <h1>Purchase Voucher</h1>
+  <div class="code">${escapeHtml(sale.voucherCode)}</div>
+  ${qr ? `<img class="qr" src="${qr}" alt="Voucher QR">` : ''}
+  <div class="meta">${escapeHtml(formatDateTime(sale.createdAt))} · ${Number(sale.count) || 0} item${Number(sale.count) === 1 ? '' : 's'}</div>
+  <hr>
+  ${rows}
+  <hr>
+  <div class="total"><span>TOTAL</span><span>${money(sale.total)}</span></div>
+  ${payment}
+  <div class="note">Scan the QR code to verify this voucher.<br>${escapeHtml(url)}</div>
+  <div class="no-print"><button onclick="window.print()">Print again</button></div>
+</body>
+</html>`);
+  win.document.close();
+  win.focus();
+  win.setTimeout(() => {
+    try { win.print(); } catch { /* the Print again button remains available */ }
+  }, 400);
+}
+
+function openVerifyDialog(prefill = '') {
+  const input = $('verifyCodeInput');
+  input.value = prefill || '';
+  $('verifyError').hidden = true;
+  $('verifyError').textContent = '';
+  showModal('verifyDialog');
+  setTimeout(() => input.focus(), 60);
+}
+
+function closeVerifyDialog() {
+  hideModal('verifyDialog');
+  if (location.hash.includes('voucher=')) {
+    history.replaceState(null, '', location.pathname + location.search);
+  }
+}
+
+async function submitVoucherVerification(event) {
+  if (event) event.preventDefault();
+  const raw = $('verifyCodeInput').value;
+  const sale = findSaleByVoucher(raw);
+  const error = $('verifyError');
+  if (!sale) {
+    error.textContent = cleanVoucherCode(raw)
+      ? 'No voucher found with that code. Check it, or try again after cloud sync.'
+      : 'Enter the voucher code printed on the voucher.';
+    error.hidden = false;
+    $('verifyCodeInput').focus();
+    return;
+  }
+  hideModal('verifyDialog');
+  const status = await voucherSignatureStatus(sale);
+  showVoucher(sale, { mode: 'verify', status });
+}
+
+function voucherCodeFromHash() {
+  const match = location.hash.match(/[#&]voucher=([^&]+)/i);
+  return match ? decodeURIComponent(match[1]) : '';
+}
+
+async function handleVoucherHash() {
+  const raw = voucherCodeFromHash();
+  if (!raw || voucherHashHandled) return;
+  const sale = findSaleByVoucher(raw);
+  if (sale) {
+    voucherHashHandled = true;
+    clearTimeout(voucherHashTimer);
+    voucherHashTimer = null;
+    const status = await voucherSignatureStatus(sale);
+    showVoucher(sale, { mode: 'verify', status });
+    return;
+  }
+  if (!voucherHashTimer) {
+    voucherHashTimer = setTimeout(() => {
+      voucherHashTimer = null;
+      if (voucherHashHandled) return;
+      voucherHashHandled = true;
+      openVerifyDialog(raw);
+      const error = $('verifyError');
+      error.textContent = 'Voucher not found yet. If cloud sync is on, check again in a moment.';
+      error.hidden = false;
+    }, 6000);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Checkout                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -2060,6 +2505,23 @@ function closeCheckoutDialog() {
   hideModal('checkoutDialog');
 }
 
+async function cancelBill() {
+  const entries = cartEntries();
+  const count = entries.reduce((sum, entry) => sum + entry.qty, 0);
+  if (!count) {
+    toast('The bill is already empty');
+    return;
+  }
+  const ok = await askConfirm(
+    `Discard all ${count} item${count === 1 ? '' : 's'} from this bill? This cannot be undone.`
+  );
+  if (!ok) return;
+  state.cart.clear();
+  saveCart();
+  renderAll();
+  toast('Bill cancelled');
+}
+
 async function completeCheckout() {
   const entries = cartEntries();
   if (!entries.length) {
@@ -2086,6 +2548,11 @@ async function completeCheckout() {
     qty
   }));
   const sale = { id: uid(), items, total, count, createdAt: nowISO() };
+  if (Number.isFinite(paid)) {
+    sale.paid = paid;
+    sale.change = Math.max(0, paid - total);
+  }
+  await issueVoucher(sale);
 
   const confirmButton = $('checkoutConfirm');
   const checkoutButton = $('checkoutBtn');
@@ -2119,8 +2586,7 @@ async function completeCheckout() {
     saveCart();
     closeCheckoutDialog();
     renderAll();
-    const change = Number.isFinite(paid) ? paid - total : 0;
-    toast(change > 0 ? `Sale saved · Change ${money(change)}` : `Sale saved · ${money(total)}`);
+    showVoucher(sale, { mode: 'sale', status: sale.voucherSig ? 'signed' : 'record' });
   } catch (err) {
     console.error(err);
     toast('Could not complete the sale — please try again');
@@ -2530,6 +2996,7 @@ function bindEvents() {
   $('checkoutBtn').addEventListener('click', openCheckoutDialog);
   $('checkoutCancel').addEventListener('click', closeCheckoutDialog);
   $('checkoutConfirm').addEventListener('click', completeCheckout);
+  $('cancelBillBtn').addEventListener('click', cancelBill);
   $('checkoutPaid').addEventListener('input', updateCheckoutChange);
   $('checkoutPaid').addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
@@ -2537,6 +3004,11 @@ function bindEvents() {
       if (!$('checkoutConfirm').disabled) completeCheckout();
     }
   });
+  $('voucherCloseBtn').addEventListener('click', closeVoucherDialog);
+  $('voucherPrintBtn').addEventListener('click', printVoucher);
+  $('verifyVoucherBtn').addEventListener('click', () => openVerifyDialog());
+  $('verifyCancel').addEventListener('click', closeVerifyDialog);
+  $('verifyForm').addEventListener('submit', submitVoucherVerification);
 
   $('confirmNo').addEventListener('click', () => closeConfirm(false));
   $('confirmYes').addEventListener('click', () => closeConfirm(true));
@@ -2601,6 +3073,12 @@ function bindEvents() {
   $('checkoutDialog').addEventListener('click', (event) => {
     if (event.target === $('checkoutDialog')) closeCheckoutDialog();
   });
+  $('voucherDialog').addEventListener('click', (event) => {
+    if (event.target === $('voucherDialog')) closeVoucherDialog();
+  });
+  $('verifyDialog').addEventListener('click', (event) => {
+    if (event.target === $('verifyDialog')) closeVerifyDialog();
+  });
   $('pinDialog').addEventListener('click', (event) => {
     if (event.target === $('pinDialog')) closePinDialog(null);
   });
@@ -2614,11 +3092,20 @@ function bindEvents() {
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
     if (!$('pinDialog').hidden) closePinDialog(null);
+    else if (!$('voucherDialog').hidden) closeVoucherDialog();
+    else if (!$('verifyDialog').hidden) closeVerifyDialog();
     else if (!$('checkoutDialog').hidden) closeCheckoutDialog();
     else if (!$('confirmDialog').hidden) closeConfirm(false);
     else if (!$('scanModal').hidden) closeScanner();
     else if (!$('imageSearchModal').hidden) closeImageSearch();
     else if (!$('productSheet').hidden) closeProductSheet();
+  });
+
+  window.addEventListener('hashchange', () => {
+    voucherHashHandled = false;
+    clearTimeout(voucherHashTimer);
+    voucherHashTimer = null;
+    handleVoucherHash();
   });
 
   window.addEventListener('online', () => {
@@ -2661,6 +3148,7 @@ async function init() {
 
   pruneCart();
   renderAll();
+  handleVoucherHash();
 
   if (firebaseConfigured()) {
     updateSyncStatus('connecting', 'Starting cloud sync…');
