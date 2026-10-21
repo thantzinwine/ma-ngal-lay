@@ -73,6 +73,17 @@ configured. No further Firebase console work is required.
   first, then synced to Firestore.
 - Offline use is fully supported. Pending writes are queued and sent when the
   connection returns.
+- The app can run offline all day. Sign in online once on each device; after
+  that, reopening the app offline works because the login session and app files
+  are cached on the device.
+- For a once-a-day sync, keep the phone offline during the day and reconnect
+  when you want to update. Queued sales, costs and edits upload automatically
+  when the connection returns.
+- Vouchers created while offline exist on the device immediately, but the public
+  verification page can verify them only after the device syncs. If a customer
+  needs to verify a voucher right away, connect once before handing it over.
+- Do not sign out or clear the browser/site data while offline — signing in
+  again needs an internet connection.
 - Use **Settings → Backup & Restore** for a JSON backup before big changes.
 - **History → 🧾 Costs** records stock purchases, the electric meter bill, gas
   bill and other expenses with a date. The same tab shows costs and real

@@ -22,7 +22,11 @@ when the owner is signed in.
   transport and other expenses with a date. The Costs tab shows costs and
   **real revenue (sales − costs)** for today, this week, this month and all time.
 - JSON backup / restore.
-- Works offline (PWA) and syncs across devices.
+- Works offline after the first online sign-in (PWA). Sales, costs and edits
+  are saved on the device and upload automatically when the phone reconnects.
+- For a once-a-day sync: keep the phone offline during the day and reconnect
+  once in the evening. Vouchers created offline become verifiable on the public
+  page only after that sync.
 
 ## Setup
 

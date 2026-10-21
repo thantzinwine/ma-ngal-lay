@@ -5,7 +5,6 @@
 'use strict';
 
 const APP_ID = 'ma-ngal-lay';
-const FB_VERSION = '11.0.1';
 const CART_KEY = 'mnl-cart-v1';
 const META_PREFIX = 'mnl-meta-';
 const DB_NAME = 'ma-ngal-lay-app';
@@ -1415,10 +1414,9 @@ function setLoginBusy(busy, label) {
 
 async function initAuth() {
   try {
-    const base = `https://www.gstatic.com/firebasejs/${FB_VERSION}/`;
     const [appModule, authModule] = await Promise.all([
-      import(`${base}firebase-app.js`),
-      import(`${base}firebase-auth.js`)
+      import('./vendor/firebase/firebase-app.js'),
+      import('./vendor/firebase/firebase-auth.js')
     ]);
 
     const app = appModule.getApps().length
@@ -1477,6 +1475,7 @@ async function handleAuthState(user) {
   }
 
   let isOwner = false;
+  let tokenError = null;
   try {
     let token = await user.getIdTokenResult();
     isOwner = Boolean(token.claims && token.claims.owner === true);
@@ -1485,7 +1484,19 @@ async function handleAuthState(user) {
       isOwner = Boolean(token.claims && token.claims.owner === true);
     }
   } catch (err) {
+    tokenError = err;
     console.warn('[auth] could not read the owner claim', err);
+  }
+
+  // Offline cold start: a cached token can expire after long offline use.
+  // If this device already verified this exact owner account, keep working
+  // locally until the network is back instead of locking the shop out.
+  if (!isOwner && tokenError && !navigator.onLine) {
+    const savedOwnerUid = metaGet('ownerUid');
+    if (savedOwnerUid && savedOwnerUid === user.uid) {
+      isOwner = true;
+      console.warn('[auth] offline owner fallback used for', user.uid);
+    }
   }
 
   if (!isOwner) {
@@ -1497,6 +1508,7 @@ async function handleAuthState(user) {
     return;
   }
 
+  if (user.uid) metaSet('ownerUid', user.uid);
   state.authUser = user;
   showLoginError('');
   await unlockOwnerApp(user);
@@ -1736,10 +1748,9 @@ async function initFirebase() {
   updateSyncStatus('connecting', 'Connecting to Firebase…');
 
   try {
-    const base = `https://www.gstatic.com/firebasejs/${FB_VERSION}/`;
     const [appModule, firestoreModule] = await Promise.all([
-      import(`${base}firebase-app.js`),
-      import(`${base}firebase-firestore.js`)
+      import('./vendor/firebase/firebase-app.js'),
+      import('./vendor/firebase/firebase-firestore.js')
     ]);
 
     const app = state.firebaseApp

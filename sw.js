@@ -1,4 +1,4 @@
-const CACHE = 'ma-ngal-lay-v13';
+const CACHE = 'ma-ngal-lay-v14';
 
 const ASSETS = [
   './',
@@ -11,6 +11,9 @@ const ASSETS = [
   './image.png',
   './vendor/qrcode.min.js',
   './vendor/html5-qrcode.min.js',
+  './vendor/firebase/firebase-app.js',
+  './vendor/firebase/firebase-auth.js',
+  './vendor/firebase/firebase-firestore.js',
   './firebase-config.js',
   './manifest.json',
   './icons/icon.svg',

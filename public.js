@@ -3,7 +3,6 @@
  * and one voucher document at a time from `vouchers` (get only, no list).
  */
 
-const FB_VERSION = '11.0.1';
 const cfg = window.FIREBASE_CONFIG || {};
 
 const numberFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
@@ -433,10 +432,9 @@ async function init() {
   }
 
   try {
-    const base = `https://www.gstatic.com/firebasejs/${FB_VERSION}/`;
     const [appModule, firestoreModule] = await Promise.all([
-      import(`${base}firebase-app.js`),
-      import(`${base}firebase-firestore.js`)
+      import('./vendor/firebase/firebase-app.js'),
+      import('./vendor/firebase/firebase-firestore.js')
     ]);
     const app = appModule.getApps().length ? appModule.getApp() : appModule.initializeApp(cfg);
     db = firestoreModule.getFirestore(app);
