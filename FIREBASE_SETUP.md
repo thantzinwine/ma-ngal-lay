@@ -30,11 +30,11 @@ the other. Either URL can be installed as a PWA: open it in Chrome → menu →
 2. Created the Firestore database in `asia-southeast1` (Singapore).
 3. Registered the web app `ministore` and copied its config into
    `firebase-config.js`.
-4. Published `firestore.rules`. `products`, `sales`, `changes` and `costs`
-   are owner-only; `catalog` is public read-only; `vouchers` can be fetched
-   one code at a time and cannot be listed.
-5. Enabled Firebase Authentication (Email/Password) and created the owner
-   account with the custom claim `owner: true`.
+4. Published `firestore.rules` for multi-shop data: each shop reads/writes only
+   `shops/{shopId}/…`; the old single-shop collections remain only for the
+   legacy owner migration.
+5. Enabled Firebase Authentication (Email/Password). New shops can sign up;
+   the original owner account still has the `owner: true` claim for migration.
 6. Deployed the site to Firebase Hosting.
 7. Published a copy to GitHub Pages and verified real cross-device sync.
 8. Vendored the Firebase Auth/Firestore SDK under `vendor/firebase/` so the
@@ -43,28 +43,33 @@ the other. Either URL can be installed as a PWA: open it in Chrome → menu →
 The owner login, Firestore rules and the public customer page are already
 configured. No further Firebase console work is required.
 
-## Owner login and the public page
+## Accounts, shops and the public page
 
 | Page | URL | Who uses it |
 | --- | --- | --- |
-| Shop manager | `https://thantzinwine.github.io/ma-ngal-lay/` | Owner only. Shows a sign-in screen until the owner logs in. |
-| Public shop page | `https://thantzinwine.github.io/ma-ngal-lay/shop.html` | Customers. Shows the product catalog and price list, and verifies one voucher at a time. |
+| Shop manager | `https://thantzinwine.github.io/ma-ngal-lay/` | Shop owners. Shows sign-in until the account logs in. |
+| Public shop page | `https://thantzinwine.github.io/ma-ngal-lay/shop.html?shop=<slug>` | Customers. Shows that shop's catalog and verifies one voucher at a time. |
 
-- The shop manager requires the owner email and password. The owner account has
-  the Firebase Auth custom claim `owner: true`; Firestore rules check that
-  claim, so a normal signed-in user still cannot read or change shop data.
+- **New shops** tap **Create an account**, then name the shop and choose a
+  public slug (for example `my-shop`). Every shop gets its own data under
+  `shops/{shopId}/…` and its own public link.
+- **One owner account per shop.** The account email/password is the owner login.
+- The old single-shop owner account keeps the `owner: true` claim, but only so
+  it can copy its existing data into a new shop. That claim can be removed from
+  Firebase Auth once the migration is finished.
 - The public page never reads `products`, `sales`, `changes` or `costs`. It
-  reads a sanitized `catalog` collection (no stock quantities and no stock
-  value) and individual `vouchers/{code}` documents.
+  reads `shops/{shopId}/public/info`, a sanitized `shops/{shopId}/catalog`
+  collection (no stock quantities and no stock value) and individual
+  `shops/{shopId}/vouchers/{code}` documents.
 - Customers can verify a voucher by scanning its QR code with the camera or by
-  typing the code. Both methods check the same `vouchers/{code}` document.
-- New voucher QRs open `shop.html#voucher=CODE`. Old printed QRs that point at
-  `index.html#voucher=CODE` are automatically redirected to the public page.
+  typing the code. Both methods check the same voucher document.
+- New voucher QRs open `shop.html?shop=<slug>#voucher=CODE`.
 - Customers cannot list vouchers: rules allow a single `get` by code but deny
   `list`.
-- If the owner forgets the password, use **Forgot password?** on the login
+- If an owner forgets the password, use **Forgot password?** on the login
   screen. The reset email works because `thantzinwine.github.io` is in the
   Firebase Auth authorized domains list.
+- `shopSlugs/{slug}` maps the public slug to a shop id. It is public read.
 
 ## Day-to-day use
 
@@ -155,31 +160,65 @@ the new assets.
 
 ## Firestore rules
 
-The deployed rules give the owner full access and the public page read-only
-access to the sanitized collections:
+The deployed rules give each shop owner full access to their own shop and the
+public page read-only access to that shop's sanitized collections:
 
 ```javascript
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    function isOwner() {
-      return request.auth != null && request.auth.token.owner == true;
+    function signedIn() { return request.auth != null; }
+
+    function isShopOwner(shopId) {
+      return signedIn()
+        && get(/databases/$(database)/documents/shops/$(shopId)).data.ownerUid == request.auth.uid;
     }
 
-    match /products/{productId} { allow read, write: if isOwner(); }
-    match /sales/{saleId}       { allow read, write: if isOwner(); }
-    match /changes/{changeId}   { allow read, write: if isOwner(); }
-    match /costs/{costId}       { allow read, write: if isOwner(); }
+    function isLegacyOwner() {
+      return signedIn() && request.auth.token.owner == true;
+    }
 
-    match /catalog/{productId} {
+    match /users/{uid} {
+      allow read, write: if signedIn() && request.auth.uid == uid;
+    }
+
+    match /shopSlugs/{slug} {
       allow read: if true;
-      allow write: if isOwner();
+      allow create: if signedIn()
+        && request.resource.data.ownerUid == request.auth.uid
+        && getAfter(/databases/$(database)/documents/shops/$(request.resource.data.shopId)).data.ownerUid == request.auth.uid;
+      allow update, delete: if signedIn()
+        && get(/databases/$(database)/documents/shopSlugs/$(slug)).data.ownerUid == request.auth.uid;
     }
 
-    match /vouchers/{voucherCode} {
+    match /shops/{shopId} {
+      allow get: if isShopOwner(shopId);
+      allow create: if signedIn() && request.resource.data.ownerUid == request.auth.uid;
+      allow update, delete: if isShopOwner(shopId);
+
+      match /products/{id}  { allow read, write: if isShopOwner(shopId); }
+      match /sales/{id}     { allow read, write: if isShopOwner(shopId); }
+      match /changes/{id}   { allow read, write: if isShopOwner(shopId); }
+      match /costs/{id}     { allow read, write: if isShopOwner(shopId); }
+      match /publicMeta/{id} { allow read, write: if isShopOwner(shopId); }
+      match /catalog/{id}   { allow read: if true; allow write: if isShopOwner(shopId); }
+      match /public/{id}    { allow get: if true; allow write: if isShopOwner(shopId); }
+      match /vouchers/{code} {
+        allow get: if true;
+        allow list: if isShopOwner(shopId);
+        allow write: if isShopOwner(shopId);
+      }
+    }
+
+    // Temporary legacy access for the original single-shop data.
+    match /products/{id} { allow read, write: if isLegacyOwner(); }
+    match /sales/{id}    { allow read, write: if isLegacyOwner(); }
+    match /changes/{id}  { allow read, write: if isLegacyOwner(); }
+    match /costs/{id}    { allow read, write: if isLegacyOwner(); }
+    match /catalog/{id}  { allow read: if true; allow write: if isLegacyOwner(); }
+    match /vouchers/{code} {
       allow get: if true;
-      allow list: if isOwner();
-      allow write: if isOwner();
+      allow list, write: if isLegacyOwner();
     }
 
     match /{document=**} { allow read, write: if false; }
@@ -195,18 +234,23 @@ firebase deploy --only firestore:rules
 
 ## Security notes
 
-- `products`, `sales`, `changes` and `costs` require the `owner: true` custom
-  claim. A signed-in account without that claim is rejected by Firestore.
-- `catalog` is intended to be public: it contains only product name, category,
-  price, photo and availability. Stock quantities are never written there.
-- `vouchers/{code}` contains the code, date, items and total for one purchase.
-  Anyone with the code can fetch that single document; nobody can list all
-  vouchers. Voucher codes are random and were not designed to be secret, so
-  treat the public verification page as a convenience check, not as proof of
-  payment.
+- Each shop's private collections live under `shops/{shopId}/…` and require the
+  shop owner account (the account recorded in `shops/{shopId}.ownerUid`).
+- A signed-in account that does not own a shop cannot read or change that
+  shop's data. It can only create its own shop and its own `users/{uid}` row.
+- `shops/{shopId}/catalog` and `shops/{shopId}/public/info` are public read:
+  they contain product name, category, price, photo and availability only.
+  Stock quantities are never written there.
+- `shops/{shopId}/vouchers/{code}` contains the code, date, items and total for
+  one purchase. Anyone with the code can fetch that single document; nobody
+  can list all vouchers. Voucher codes are random and were not designed to be
+  secret, so treat the public verification page as a convenience check, not as
+  proof of payment.
+- The original single-shop data is readable only by the legacy owner claim, so
+  the old app keeps working until its data is migrated.
 - The owner app can sign a voucher with an HMAC key stored on that device. The
   public page does **not** verify this signature; it only checks that the
-  `vouchers/{code}` document exists. Vouchers are also not marked as redeemed,
+  voucher document exists. Vouchers are also not marked as redeemed,
   so a copied QR/code can be checked repeatedly.
 - The Firebase web config (API key, project ID) is public by design. Access is
   controlled by Authentication and the rules.

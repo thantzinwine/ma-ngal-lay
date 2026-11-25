@@ -1673,6 +1673,90 @@ body.auth-locked .fab { display: none !important; }
   margin-top: 18px;
 }
 
+#showSignupBtn {
+  margin-top: 10px;
+  margin-bottom: 0;
+  background: transparent;
+  border-color: transparent;
+  color: var(--accent-dark);
+  font-weight: 800;
+}
+
+#showLoginBtn {
+  margin-top: 10px;
+  margin-bottom: 0;
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.slug-input {
+  display: flex;
+  align-items: stretch;
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--card);
+}
+
+.slug-input:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.15);
+}
+
+.slug-prefix {
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--muted);
+  background: var(--grad-soft);
+  white-space: nowrap;
+}
+
+.slug-input input {
+  border: 0;
+  border-radius: 0;
+  margin: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
+.slug-input input:focus { box-shadow: none; }
+
+.check-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  text-align: left;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--muted);
+  line-height: 1.45;
+  background: var(--grad-soft);
+  border-radius: 12px;
+  padding: 12px 13px;
+  margin-bottom: 13px;
+}
+
+.check-field input {
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  accent-color: var(--accent);
+  flex: none;
+}
+
+.shop-link-line {
+  margin-top: 12px;
+  word-break: break-all;
+}
+
+.shop-link-line a { color: var(--accent-dark); font-weight: 700; }
+
 .auth-note a { color: var(--accent-dark); font-weight: 800; }
 
 .logo-image {

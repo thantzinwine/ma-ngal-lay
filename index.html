@@ -18,11 +18,11 @@
 </head>
 <body class="auth-locked">
   <div class="auth-screen" id="authScreen">
-    <div class="auth-card">
+    <div class="auth-card" id="loginCard">
       <span class="auth-logo"><img src="image.png" alt="Ma Ngal Lay logo"></span>
-      <p class="auth-eyebrow">Owner access</p>
-      <h1>Ma Ngal Lay</h1>
-      <p class="auth-sub">Sign in to open the shop manager.</p>
+      <p class="auth-eyebrow">Shop access</p>
+      <h1>Sign in</h1>
+      <p class="auth-sub">Sign in to open your shop manager.</p>
       <form id="loginForm" autocomplete="on">
         <label class="field">Email
           <input id="loginEmail" type="email" autocomplete="username" required placeholder="owner@example.com">
@@ -33,16 +33,68 @@
         <p class="form-error" id="loginError" hidden></p>
         <button id="loginSubmit" class="btn primary big block" type="submit">Sign in</button>
         <button id="forgotPasswordBtn" class="btn block" type="button">Forgot password?</button>
+        <button id="showSignupBtn" class="btn block" type="button">New shop? Create an account</button>
       </form>
-      <p class="auth-note">Customers can view the catalog and verify a voucher on the
-        <a href="shop.html">public shop page</a>.</p>
+      <p class="auth-note">Customers can view your catalog and verify a voucher on the
+        public shop page.</p>
+    </div>
+
+    <div class="auth-card" id="signupCard" hidden>
+      <span class="auth-logo"><img src="image.png" alt="Ma Ngal Lay logo"></span>
+      <p class="auth-eyebrow">New shop</p>
+      <h1>Create an account</h1>
+      <p class="auth-sub">Every shop gets its own account, products and public page.</p>
+      <form id="signupForm" autocomplete="on">
+        <label class="field">Email
+          <input id="signupEmail" type="email" autocomplete="username" required placeholder="you@example.com">
+        </label>
+        <label class="field">Password
+          <input id="signupPassword" type="password" autocomplete="new-password" minlength="8" required placeholder="At least 8 characters">
+        </label>
+        <p class="form-error" id="signupError" hidden></p>
+        <button id="signupSubmit" class="btn primary big block" type="submit">Create account</button>
+        <button id="showLoginBtn" class="btn block" type="button">← Back to sign in</button>
+      </form>
+    </div>
+
+    <div class="auth-card" id="shopSetupCard" hidden>
+      <span class="auth-logo"><img src="image.png" alt="Ma Ngal Lay logo"></span>
+      <p class="auth-eyebrow">One more step</p>
+      <h1>Name your shop</h1>
+      <p class="auth-sub">This name appears on your catalog, vouchers and receipts.</p>
+      <form id="shopSetupForm" autocomplete="off">
+        <label class="field">Shop name
+          <input id="shopNameInput" type="text" maxlength="40" required placeholder="e.g. Ma Ngal Lay">
+        </label>
+        <label class="field">Shop link
+          <span class="slug-input">
+            <span class="slug-prefix">shop.html?shop=</span>
+            <input id="shopSlugInput" type="text" maxlength="30" required placeholder="my-shop" inputmode="latin">
+          </span>
+        </label>
+        <label class="field">Currency
+          <select id="shopCurrency">
+            <option value="K" selected>Myanmar Kyat (K)</option>
+            <option value="฿">Thai Baht (฿)</option>
+            <option value="$">US Dollar ($)</option>
+            <option value="₹">Indian Rupee (₹)</option>
+          </select>
+        </label>
+        <label class="check-field" id="legacyImportWrap" hidden>
+          <input id="legacyImport" type="checkbox">
+          <span>Copy my existing Ma Ngal Lay products, sales and costs into this shop</span>
+        </label>
+        <p class="form-error" id="shopSetupError" hidden></p>
+        <button id="shopSetupSubmit" class="btn primary big block" type="submit">Open my shop</button>
+        <button id="shopSetupSignOut" class="btn block" type="button">Sign out</button>
+      </form>
     </div>
   </div>
 
   <header class="topbar">
     <div class="brand">
-      <span class="logo logo-image"><img src="image.png" alt=""></span>
-      <h1>Ma Ngal Lay</h1>
+      <span class="logo logo-image"><img id="shopLogo" src="image.png" alt=""></span>
+      <h1 id="shopTitle">Ma Ngal Lay</h1>
     </div>
     <div class="topbar-right">
       <div class="inv-value" id="invValue">Stock worth 0 K</div>
@@ -91,7 +143,7 @@
         <p id="posEmptyText">No products yet</p>
         <p class="empty-hint">Add products from the Products tab first</p>
       </div>
-      <h3 class="section-title" id="voucherTitle" hidden>Voucher</h3>
+      <h3 class="section-title" id="voucherSectionTitle" hidden>Voucher</h3>
       <div class="cart-list" id="cartList"></div>
       <div class="cart-empty empty" id="cartEmpty">
         <div class="empty-ic">🧾</div>
@@ -153,6 +205,23 @@
 
     <section id="screen-settings" class="screen">
       <div class="settings-card">
+        <h2>Shop profile</h2>
+        <p class="about">This name, currency and link are used across the app, vouchers and your public page.</p>
+        <label class="field">Shop name
+          <input id="shopNameEdit" type="text" maxlength="40" autocomplete="off">
+        </label>
+        <label class="field">Currency
+          <select id="shopCurrencyEdit">
+            <option value="K">Myanmar Kyat (K)</option>
+            <option value="฿">Thai Baht (฿)</option>
+            <option value="$">US Dollar ($)</option>
+            <option value="₹">Indian Rupee (₹)</option>
+          </select>
+        </label>
+        <button id="saveShopProfileBtn" class="btn primary block" type="button">Save shop profile</button>
+        <p class="about shop-link-line">Public link: <a id="shopPublicLink" href="shop.html" target="_blank" rel="noopener">shop.html</a></p>
+        <button id="copyShopLinkBtn" class="btn block" type="button">Copy public link</button>
+        <p class="about">Shop link: <strong id="shopProfileSlug">—</strong> · <span id="shopProfileName">—</span></p>
         <h2>Owner account</h2>
         <p class="about" id="accountStatusText">Not signed in.</p>
         <div class="owner-actions">

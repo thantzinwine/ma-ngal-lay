@@ -1,15 +1,28 @@
-# Ma Ngal Lay — mini mart POS
+# Ma Ngal Lay — multi-shop POS
 
-Private point-of-sale app for the shop owner, plus a separate public page for
-customers. Data is stored locally in IndexedDB and synced to Firebase Firestore
-when the owner is signed in.
+Point-of-sale and product catalog for small shops. Any shop can create an
+account, name its shop and manage its own products, sales, costs and public
+page. Data is stored locally in IndexedDB and synced to Firebase Firestore.
 
 ## Pages
 
 | Page | Link | Who sees it |
 | --- | --- | --- |
-| Owner app | `index.html` | Owner only (Firebase login + `owner: true` claim) |
-| Public page | `shop.html` | Anyone — product names, categories, prices, availability and voucher verification. **No stock quantities are shown.** |
+| Shop manager | `index.html` | One owner account per shop (Firebase email/password) |
+| Public page | `shop.html?shop=<slug>` | Anyone — products, categories, prices, availability and voucher verification. **No stock quantities are shown.** |
+
+## How accounts work
+
+- **Create account** on the sign-in screen, then **name your shop** and choose
+  its public link (slug), e.g. `shop.html?shop=my-shop`.
+- One account owns one shop. The account email and password are the owner login.
+- Every shop's data is isolated under `shops/{shopId}/…` in Firestore and on the
+  device. Signing out and into another account uses a separate local database,
+  cart, sync queue and signing key.
+- Shop name and currency can be changed later in **Settings → Shop profile**.
+- The public link is shown in Settings with a **Copy public link** button.
+- The original `ma-ngal-lay` shop can be migrated: the old owner account sees a
+  **Copy my existing data** option when creating its shop.
 
 ## Features
 
@@ -21,11 +34,11 @@ when the owner is signed in.
 - Costs: record stock purchases, electric meter bills, gas bills, rent,
   transport and other expenses with a date. The Costs tab shows costs and
   **real revenue (sales − costs)** for today, this week, this month and all time.
-- JSON backup / restore.
+- JSON backup / restore (per shop).
 - Works offline after the first online sign-in (PWA). Sales, costs and edits
   are saved on the device and upload when the phone reconnects.
 - **Pause cloud sync / Sync now** in Settings:
-  - pause is per device and survives reloads;
+  - pause is per device and per shop, and survives reloads;
   - while paused, changes stay in the local outbox;
   - **Sync now** resumes the network, uploads the outbox and refreshes the
     cloud listeners;
@@ -43,14 +56,11 @@ when the owner is signed in.
 - Vouchers created offline or while paused become verifiable on the public page
   only after that sync.
 
-Pause is saved on the device where you tap it. If the owner account is signed in
-on another phone or PC, that device keeps syncing unless it is paused too.
-
 ## Documentation
 
 | Document | Contents |
 | --- | --- |
-| [PROJECT.md](PROJECT.md) | Full architecture, data model, security, free-tier limits, drawbacks and future improvements |
+| [PROJECT.md](PROJECT.md) | Architecture, data model, security, free-tier limits, drawbacks and future improvements |
 | [FIREBASE_SETUP.md](FIREBASE_SETUP.md) | Firebase configuration, owner login, Firestore rules, deployment and troubleshooting |
 
 ## Setup
@@ -58,7 +68,15 @@ on another phone or PC, that device keeps syncing unless it is paused too.
 See [FIREBASE_SETUP.md](FIREBASE_SETUP.md) for Firebase configuration, owner
 login, Firestore rules and deployment notes.
 
+Important: the new rules and the new shop-scoped collections must be published
+before other shops can use the app. Deploy `firestore.rules`, then push the
+site.
+
 ## To do later
 
-- [ ] 👁 Show / hide password toggle on the owner login screen and in the
+- [ ] 👁 Show / hide password toggle on the login screen and in the
       change-password dialog.
+- [ ] Staff accounts per shop (cashier role).
+- [ ] Shop logo upload.
+- [ ] Custom domains instead of `shop.html?shop=<slug>`.
+- [ ] Plans and limits once usage grows.

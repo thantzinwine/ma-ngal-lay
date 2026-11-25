@@ -11,6 +11,16 @@ const DB_NAME = 'ma-ngal-lay-app';
 const DB_VERSION = 2;
 const STORE_NAMES = ['products', 'sales', 'changes', 'costs', 'outbox'];
 const SYNC_COLLECTIONS = ['products', 'sales', 'changes', 'costs'];
+const SHOP_SLUGS = 'shopSlugs';
+const SHOP_CACHE_KEY = 'shopCache';
+const DEFAULT_SHOP_NAME = 'My Shop';
+const DEFAULT_SHOP_SLUG = 'ma-ngal-lay';
+const CURRENCY_OPTIONS = [
+  { value: 'K', label: 'Myanmar Kyat (K)' },
+  { value: '฿', label: 'Thai Baht (฿)' },
+  { value: '$', label: 'US Dollar ($)' },
+  { value: '₹', label: 'Indian Rupee (₹)' }
+];
 const COST_CATEGORIES = [
   { value: 'stock', label: 'Stock / goods purchase' },
   { value: 'electric', label: 'Electric meter bill' },
@@ -30,6 +40,14 @@ const PUBLIC_VOUCHERS = 'vouchers';
 const PUBLIC_META_VERSION = 1;
 const SYNC_PAUSED_TEXT = 'Sync paused — changes stay on this phone until you tap Sync now.';
 const OWNER_EMAIL_HINT = 'mnl-owner-email';
+
+// These flags belong to the device/account, not to one shop.
+const GLOBAL_META_KEYS = new Set([
+  OWNER_META_KEY,
+  'ownerUid',
+  'ownerPasswordAcknowledged',
+  SHOP_CACHE_KEY
+]);
 
 /* ------------------------------------------------------------------ */
 /* State                                                               */
@@ -53,7 +71,9 @@ const state = {
   scanMode: null,
   ownerUnlocked: false,
   authUser: null,
-  firebaseApp: null
+  firebaseApp: null,
+  shop: null,
+  legacyOwner: false
 };
 
 const sync = {
@@ -130,7 +150,7 @@ function parseNumber(value) {
 
 function money(n) {
   const value = Number(n);
-  return `${numberFormat.format(Number.isFinite(value) ? Math.round(value) : 0)} K`;
+  return `${numberFormat.format(Number.isFinite(value) ? Math.round(value) : 0)} ${currencySymbol()}`;
 }
 
 function uid() {
@@ -239,20 +259,31 @@ function hideModal(id) {
 /* ------------------------------------------------------------------ */
 
 let idbPromise = null;
+let idbPromiseName = '';
+
+function activeDbName() {
+  return state.shop && state.shop.id ? `${DB_NAME}-${state.shop.id}` : DB_NAME;
+}
+
+function resetIDB() {
+  idbPromise = null;
+  idbPromiseName = '';
+}
 
 function openIDB() {
-  if (idbPromise) return idbPromise;
+  const name = activeDbName();
+  if (idbPromise && idbPromiseName === name) return idbPromise;
   const promise = new Promise((resolve, reject) => {
     if (!('indexedDB' in window)) {
       reject(new Error('IndexedDB is not available'));
       return;
     }
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    const req = indexedDB.open(name, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
-      for (const name of STORE_NAMES) {
-        if (!db.objectStoreNames.contains(name)) {
-          db.createObjectStore(name, { keyPath: 'id' });
+      for (const store of STORE_NAMES) {
+        if (!db.objectStoreNames.contains(store)) {
+          db.createObjectStore(store, { keyPath: 'id' });
         }
       }
     };
@@ -261,9 +292,13 @@ function openIDB() {
     req.onblocked = () => reject(new Error('IndexedDB is blocked by another tab'));
   });
   promise.catch(() => {
-    if (idbPromise === promise) idbPromise = null;
+    if (idbPromise === promise) {
+      idbPromise = null;
+      idbPromiseName = '';
+    }
   });
   idbPromise = promise;
+  idbPromiseName = name;
   return promise;
 }
 
@@ -319,7 +354,8 @@ function idbReplace(name, records) {
 }
 
 function lsKey(name) {
-  return `mnl-${name}-v1`;
+  const shopPrefix = state.shop && state.shop.id ? `${state.shop.id}-` : '';
+  return `mnl-${shopPrefix}${name}-v1`;
 }
 
 function lsRead(name) {
@@ -390,9 +426,14 @@ async function storeReplace(name, records) {
   }
 }
 
+function metaKey(key) {
+  const scoped = state.shop && state.shop.id && !GLOBAL_META_KEYS.has(key);
+  return META_PREFIX + (scoped ? `${state.shop.id}-` : '') + key;
+}
+
 function metaGet(key) {
   try {
-    const raw = localStorage.getItem(META_PREFIX + key);
+    const raw = localStorage.getItem(metaKey(key));
     return raw === null ? undefined : JSON.parse(raw);
   } catch {
     return undefined;
@@ -401,10 +442,50 @@ function metaGet(key) {
 
 function metaSet(key, value) {
   try {
-    localStorage.setItem(META_PREFIX + key, JSON.stringify(value));
+    localStorage.setItem(metaKey(key), JSON.stringify(value));
   } catch {
     /* meta flags are a convenience, not a requirement */
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Shop context + cloud paths                                          */
+/* ------------------------------------------------------------------ */
+
+function shopId() {
+  return state.shop && state.shop.id ? state.shop.id : '';
+}
+
+function shopCol(name) {
+  return sync.fs.collection(sync.db, 'shops', shopId(), name);
+}
+
+function shopDoc(name, id) {
+  return sync.fs.doc(sync.db, 'shops', shopId(), name, id);
+}
+
+function publicInfoRef() {
+  return shopDoc('public', 'info');
+}
+
+function currencySymbol() {
+  const value = state.shop && state.shop.currency;
+  return typeof value === 'string' && value.trim() ? value.trim() : 'K';
+}
+
+function shopName() {
+  return (state.shop && state.shop.name) || DEFAULT_SHOP_NAME;
+}
+
+function publicShopUrl() {
+  const slug = (state.shop && state.shop.slug) || DEFAULT_SHOP_SLUG;
+  if (/^https?:$/.test(location.protocol)) {
+    const target = new URL('shop.html', location.href);
+    target.searchParams.set('shop', slug);
+    target.hash = '';
+    return target.href;
+  }
+  return `shop.html?shop=${encodeURIComponent(slug)}`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -830,9 +911,13 @@ function normalizeCollection(name, rows) {
 /* Cart                                                                */
 /* ------------------------------------------------------------------ */
 
+function cartStorageKey() {
+  return shopId() ? `${CART_KEY}-${shopId()}` : CART_KEY;
+}
+
 function restoreCart() {
   try {
-    const raw = JSON.parse(localStorage.getItem(CART_KEY) || '{}');
+    const raw = JSON.parse(localStorage.getItem(cartStorageKey()) || '{}');
     state.cart = new Map();
     if (raw && typeof raw === 'object') {
       for (const [id, qty] of Object.entries(raw)) {
@@ -847,7 +932,7 @@ function restoreCart() {
 
 function saveCart() {
   try {
-    localStorage.setItem(CART_KEY, JSON.stringify(Object.fromEntries(state.cart)));
+    localStorage.setItem(cartStorageKey(), JSON.stringify(Object.fromEntries(state.cart)));
   } catch {
     /* cart is still kept in memory */
   }
@@ -1037,7 +1122,7 @@ async function flushOutbox() {
         await storeDelete('outbox', entry.id);
         continue;
       }
-      const docRef = sync.fs.doc(sync.db, entry.collection, entry.docId);
+      const docRef = shopDoc(entry.collection, entry.docId);
       if (entry.op === 'delete') {
         await sync.fs.deleteDoc(docRef);
       } else {
@@ -1507,10 +1592,10 @@ async function rebuildPublicData() {
   const db = sync.db;
 
   const catalogKeep = new Set(state.products.map((product) => product.id));
-  const catalogExisting = await fs.getDocs(fs.collection(db, PUBLIC_CATALOG));
+  const catalogExisting = await fs.getDocs(shopCol(PUBLIC_CATALOG));
   const catalogOps = state.products.map((product) => ({
     type: 'set',
-    ref: fs.doc(db, PUBLIC_CATALOG, product.id),
+    ref: shopDoc(PUBLIC_CATALOG, product.id),
     data: buildPublicCatalogRecord(product)
   }));
   for (const doc of catalogExisting.docs) {
@@ -1526,11 +1611,11 @@ async function rebuildPublicData() {
     voucherKeep.add(code);
     voucherOps.push({
       type: 'set',
-      ref: fs.doc(db, PUBLIC_VOUCHERS, code),
+      ref: shopDoc(PUBLIC_VOUCHERS, code),
       data: buildPublicVoucher(sale)
     });
   }
-  const voucherExisting = await fs.getDocs(fs.collection(db, PUBLIC_VOUCHERS));
+  const voucherExisting = await fs.getDocs(shopCol(PUBLIC_VOUCHERS));
   for (const doc of voucherExisting.docs) {
     if (!voucherKeep.has(doc.id)) voucherOps.push({ type: 'delete', ref: doc.ref });
   }
@@ -1554,7 +1639,7 @@ async function commitPublicOps(ops) {
 // individually so we do not rewrite everything on every login.
 async function ensurePublicDataVersion() {
   if (!sync.ready || !sync.fs || !sync.db) return;
-  const metaRef = sync.fs.doc(sync.db, 'publicMeta', 'data');
+  const metaRef = shopDoc('publicMeta', 'data');
   try {
     const snapshot = await sync.fs.getDoc(metaRef);
     if (snapshot.exists() && Number(snapshot.data().version) >= PUBLIC_META_VERSION) return;
@@ -1575,6 +1660,8 @@ function redirectLegacyVoucherLink() {
   if (!/[#&?]voucher=/i.test(location.hash)) return;
   if (/(^|\/)(shop|public|catalog)\.html$/i.test(location.pathname)) return;
   const target = new URL('shop.html', location.href);
+  const cache = metaGet(SHOP_CACHE_KEY);
+  if (cache && cache.shop && cache.shop.slug) target.searchParams.set('shop', cache.shop.slug);
   target.hash = location.hash.replace(/^#/, '');
   location.replace(target.href);
 }
@@ -1583,6 +1670,8 @@ function authErrorMessage(err) {
   const code = (err && err.code) || '';
   if (code === 'auth/invalid-email') return 'Enter a valid email address.';
   if (code === 'auth/user-disabled') return 'This account has been disabled.';
+  if (code === 'auth/email-already-in-use') return 'That email already has an account. Sign in instead.';
+  if (code === 'auth/unauthorized-domain') return 'This site is not allowed to create accounts. Add it to Firebase Auth authorized domains.';
   if (code === 'auth/user-not-found' || code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
     return 'Wrong email or password.';
   }
@@ -1664,56 +1753,108 @@ async function initAuth() {
   }
 }
 
+function showAuthCard(card) {
+  const login = $('loginCard');
+  const signup = $('signupCard');
+  const setup = $('shopSetupCard');
+  if (login) login.hidden = card !== 'login';
+  if (signup) signup.hidden = card !== 'signup';
+  if (setup) setup.hidden = card !== 'setup';
+  document.body.classList.add('auth-locked');
+}
+
+function readCachedShop(uid) {
+  const cache = metaGet(SHOP_CACHE_KEY);
+  if (cache && cache.uid === uid && cache.shop && cache.shop.id) return cache.shop;
+  return null;
+}
+
+async function loadShopForUser(uid) {
+  const userSnap = await sync.fs.getDoc(sync.fs.doc(sync.db, 'users', uid));
+  if (!userSnap.exists()) return null;
+  const shopId = userSnap.data().shopId;
+  if (!shopId) return null;
+  const shopSnap = await sync.fs.getDoc(sync.fs.doc(sync.db, 'shops', shopId));
+  if (!shopSnap.exists()) return null;
+  return { id: shopSnap.id, ...shopSnap.data() };
+}
+
 async function handleAuthState(user) {
   if (!user) {
     state.authUser = null;
     lockShop();
+    showAuthCard('login');
     updateAccountUI();
     return;
   }
 
-  let isOwner = false;
-  let tokenError = null;
-  try {
-    let token = await user.getIdTokenResult();
-    isOwner = Boolean(token.claims && token.claims.owner === true);
-    if (!isOwner && navigator.onLine) {
-      token = await user.getIdTokenResult(true);
-      isOwner = Boolean(token.claims && token.claims.owner === true);
-    }
-  } catch (err) {
-    tokenError = err;
-    console.warn('[auth] could not read the owner claim', err);
-  }
-
-  // Offline cold start: a cached token can expire after long offline use.
-  // If this device already verified this exact owner account, keep working
-  // locally until the network is back instead of locking the shop out.
-  if (!isOwner && tokenError && !navigator.onLine) {
-    const savedOwnerUid = metaGet('ownerUid');
-    if (savedOwnerUid && savedOwnerUid === user.uid) {
-      isOwner = true;
-      console.warn('[auth] offline owner fallback used for', user.uid);
-    }
-  }
-
-  if (!isOwner) {
-    try { await sync.authModule.signOut(sync.auth); } catch { /* already signed out */ }
-    state.authUser = null;
-    lockShop();
-    updateAccountUI();
-    showLoginError('This account is not the shop owner. Sign in with the owner email.');
-    return;
-  }
-
-  if (user.uid) metaSet('ownerUid', user.uid);
   state.authUser = user;
+  let claims = {};
+  try {
+    const token = await user.getIdTokenResult();
+    claims = (token && token.claims) || {};
+  } catch (err) {
+    console.warn('[auth] could not read token claims', err);
+  }
+  state.legacyOwner = Boolean(claims.owner === true);
+  metaSet('ownerUid', user.uid);
   showLoginError('');
-  await unlockOwnerApp(user);
+
+  let lookupFailed = false;
+  let shop = null;
+  try {
+    await ensureFirestore();
+    shop = await loadShopForUser(user.uid);
+  } catch (err) {
+    lookupFailed = true;
+    console.warn('[auth] could not load the account shop', err);
+  }
+
+  if (!shop && (lookupFailed || !navigator.onLine)) {
+    shop = readCachedShop(user.uid);
+  }
+
+  if (!shop) {
+    if (!navigator.onLine) {
+      showLoginError('Connect to the internet once to finish setting up your shop.');
+      showAuthCard('login');
+      updateAccountUI();
+      return;
+    }
+    openShopSetup();
+    return;
+  }
+
+  await enterShop(user, shop);
 }
 
-async function unlockOwnerApp(user) {
+function openShopSetup() {
+  document.body.classList.add('auth-locked');
+  showAuthCard('setup');
+  const email = (state.authUser && state.authUser.email) || '';
+  const nameInput = $('shopNameInput');
+  if (nameInput && !nameInput.value) {
+    const hint = email.split('@')[0].replace(/[._-]+/g, ' ').trim();
+    nameInput.value = hint || '';
+  }
+  const importWrap = $('legacyImportWrap');
+  const importInput = $('legacyImport');
+  if (importWrap) importWrap.hidden = !state.legacyOwner;
+  if (importInput) importInput.checked = Boolean(state.legacyOwner);
+  const slugInput = $('shopSlugInput');
+  if (slugInput) delete slugInput.dataset.touched;
+  if ($('shopSetupError')) $('shopSetupError').hidden = true;
+  updateSetupSlug();
+  setTimeout(() => nameInput && nameInput.focus(), 80);
+}
+
+async function enterShop(user, shop) {
   state.authUser = user || null;
+  state.shop = shop || null;
+  resetIDB();
+  if (user && shop) metaSet(SHOP_CACHE_KEY, { uid: user.uid, shop });
+  sync.paused = Boolean(metaGet('syncPaused'));
+  applyShopBranding();
   document.body.classList.remove('auth-locked');
   updateAccountUI();
   updateSyncControls();
@@ -1726,14 +1867,12 @@ async function unlockOwnerApp(user) {
     renderAll();
   }
 
-  if (firebaseConfigured() && user) {
+  if (firebaseConfigured() && user && shopId()) {
     updateSyncStatus('connecting', 'Starting cloud sync…');
     initFirebase();
   } else if (!firebaseConfigured()) {
     updateSyncStatus('local', 'Local only — data stays on this device.');
   }
-
-  maybePromptPasswordChange(user);
 }
 
 function lockShop() {
@@ -1744,14 +1883,20 @@ function lockShop() {
   sync.unsubs = [];
   sync.ready = false;
   sync.initializing = false;
+  sync.fatal = false;
+  sync.seeded = false;
   sync.serverSnapshots.clear();
   sync.meta = {};
+  sync.publicDataChecked = false;
   state.authUser = null;
+  state.shop = null;
   state.products = [];
   state.sales = [];
   state.changes = [];
   state.costs = [];
   state.cart.clear();
+  ownerAppStarted = false;
+  resetIDB();
   renderAll();
 }
 
@@ -1780,7 +1925,8 @@ function updateAccountUI() {
   }
 
   if (state.authUser) {
-    status.textContent = `Signed in as ${state.authUser.email}. Only this owner account can read or change the shop data.`;
+    const where = state.shop ? ` the shop “${shopName()}”` : ' your shop';
+    status.textContent = `Signed in as ${state.authUser.email}. This account manages${where} only.`;
     if (changeButton) changeButton.hidden = false;
     if (signOutButton) signOutButton.hidden = false;
   } else {
@@ -1817,6 +1963,341 @@ async function handleLoginSubmit(event) {
     showLoginError(authErrorMessage(err));
   } finally {
     setLoginBusy(false);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Sign-up and shop creation                                           */
+/* ------------------------------------------------------------------ */
+
+function slugify(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 30)
+    .replace(/-+$/g, '');
+}
+
+function showSignupError(message) {
+  const node = $('signupError');
+  if (!node) return;
+  node.textContent = message || '';
+  node.hidden = !message;
+}
+
+function setSignupBusy(busy, label) {
+  const button = $('signupSubmit');
+  if (!button) return;
+  button.disabled = busy;
+  button.textContent = busy ? label || 'Please wait…' : 'Create account';
+}
+
+async function handleSignupSubmit(event) {
+  event.preventDefault();
+  if (!sync.auth || !sync.authModule) {
+    showSignupError('Sign-up is still starting. Wait a moment and try again.');
+    return;
+  }
+  const email = $('signupEmail').value.trim();
+  const password = $('signupPassword').value;
+  if (password.length < 8) {
+    showSignupError('Use a password with at least 8 characters.');
+    return;
+  }
+  showSignupError('');
+  setSignupBusy(true, 'Creating account…');
+  try {
+    await sync.authModule.createUserWithEmailAndPassword(sync.auth, email, password);
+    localStorage.setItem(OWNER_EMAIL_HINT, email);
+  } catch (err) {
+    showSignupError(authErrorMessage(err));
+  } finally {
+    setSignupBusy(false);
+  }
+}
+
+function updateSetupSlug() {
+  const nameInput = $('shopNameInput');
+  const slugInput = $('shopSlugInput');
+  if (!nameInput || !slugInput) return;
+  if (!slugInput.dataset.touched) {
+    slugInput.value = slugify(nameInput.value) || '';
+  }
+}
+
+function showShopSetupError(message) {
+  const node = $('shopSetupError');
+  if (!node) return;
+  node.textContent = message || '';
+  node.hidden = !message;
+}
+
+function setShopSetupBusy(busy, label) {
+  const button = $('shopSetupSubmit');
+  if (!button) return;
+  button.disabled = busy;
+  button.textContent = busy ? label || 'Please wait…' : 'Open my shop';
+}
+
+async function checkSlugAvailable(slug) {
+  const snapshot = await sync.fs.getDoc(sync.fs.doc(sync.db, SHOP_SLUGS, slug));
+  return !snapshot.exists();
+}
+
+async function handleShopSetupSubmit(event) {
+  event.preventDefault();
+  if (!state.authUser) {
+    showShopSetupError('Sign in again to continue.');
+    return;
+  }
+  const name = $('shopNameInput').value.trim().replace(/\s+/g, ' ');
+  const slug = slugify($('shopSlugInput').value || name);
+  const currency = ($('shopCurrency') && $('shopCurrency').value) || 'K';
+  const importLegacy = Boolean($('legacyImport') && $('legacyImport').checked);
+
+  if (name.length < 2) {
+    showShopSetupError('Give your shop a name (at least 2 characters).');
+    return;
+  }
+  if (slug.length < 2) {
+    showShopSetupError('Choose a shop link with at least 2 letters or numbers.');
+    return;
+  }
+
+  showShopSetupError('');
+  setShopSetupBusy(true, 'Creating your shop…');
+  let shop = null;
+  try {
+    await ensureFirestore();
+    if (!(await checkSlugAvailable(slug))) {
+      showShopSetupError(`The link “${slug}” is already taken. Try another.`);
+      return;
+    }
+
+    const uidValue = state.authUser.uid;
+    const now = nowISO();
+    const id = uid();
+    shop = {
+      id,
+      name,
+      slug,
+      currency,
+      logo: '',
+      ownerUid: uidValue,
+      ownerEmail: state.authUser.email || '',
+      createdAt: now,
+      updatedAt: now
+    };
+
+    await sync.fs.setDoc(sync.fs.doc(sync.db, 'shops', id), shop);
+    await sync.fs.setDoc(sync.fs.doc(sync.db, SHOP_SLUGS, slug), {
+      shopId: id,
+      name,
+      slug,
+      ownerUid: uidValue,
+      createdAt: now
+    });
+    await sync.fs.setDoc(sync.fs.doc(sync.db, 'shops', id, 'public', 'info'), {
+      name,
+      slug,
+      currency,
+      logo: '',
+      updatedAt: now
+    });
+    await sync.fs.setDoc(sync.fs.doc(sync.db, 'users', uidValue), {
+      shopId: id,
+      email: state.authUser.email || '',
+      createdAt: now
+    });
+
+    if (importLegacy) {
+      setShopSetupBusy(true, 'Copying your existing data…');
+      await copyLegacyCloudData(id);
+      await copyLegacyLocalData(id);
+    }
+
+    await enterShop(state.authUser, shop);
+    toast(importLegacy ? 'Shop created — existing data copied' : 'Shop created');
+  } catch (err) {
+    console.error('[shop] creation failed', err);
+    const code = err && err.code;
+    if (code === 'permission-denied') {
+      showShopSetupError('Could not create the shop. Publish the updated Firestore rules, then try again.');
+    } else if (err && err.message === 'SLUG_TAKEN') {
+      showShopSetupError('That shop link is already taken.');
+    } else {
+      showShopSetupError(navigator.onLine
+        ? 'Could not create the shop right now. Please try again.'
+        : 'You need an internet connection to create a shop.');
+    }
+  } finally {
+    setShopSetupBusy(false);
+  }
+}
+
+async function copyLegacyCloudData(shopIdValue) {
+  const fs = sync.fs;
+  const db = sync.db;
+  const copyCollection = async (fromPath, toCol) => {
+    const snapshot = await fs.getDocs(fs.collection(db, ...fromPath));
+    const docs = snapshot.docs;
+    for (let i = 0; i < docs.length; i += 400) {
+      const batch = fs.writeBatch(db);
+      for (const entry of docs.slice(i, i + 400)) {
+        batch.set(fs.doc(db, 'shops', shopIdValue, toCol, entry.id), entry.data());
+      }
+      await batch.commit();
+    }
+  };
+
+  for (const name of SYNC_COLLECTIONS) {
+    await copyCollection([name], name);
+  }
+  await copyCollection([PUBLIC_CATALOG], PUBLIC_CATALOG);
+  await copyCollection([PUBLIC_VOUCHERS], PUBLIC_VOUCHERS);
+}
+
+function readLegacyLocalStores() {
+  return new Promise((resolve) => {
+    if (!('indexedDB' in window)) {
+      resolve(null);
+      return;
+    }
+    let req;
+    try {
+      req = indexedDB.open(DB_NAME, DB_VERSION);
+    } catch {
+      resolve(null);
+      return;
+    }
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      for (const store of STORE_NAMES) {
+        if (!db.objectStoreNames.contains(store)) db.createObjectStore(store, { keyPath: 'id' });
+      }
+    };
+    req.onerror = () => resolve(null);
+    req.onsuccess = () => {
+      const db = req.result;
+      const out = {};
+      let pending = STORE_NAMES.length;
+      const done = () => {
+        pending -= 1;
+        if (pending === 0) {
+          try { db.close(); } catch { /* ignore */ }
+          resolve(out);
+        }
+      };
+      for (const store of STORE_NAMES) {
+        try {
+          const tx = db.transaction(store, 'readonly');
+          const getAll = tx.objectStore(store).getAll();
+          getAll.onsuccess = () => {
+            out[store] = getAll.result || [];
+            done();
+          };
+          getAll.onerror = done;
+        } catch {
+          done();
+        }
+      }
+    };
+  });
+}
+
+async function copyLegacyLocalData(shopIdValue) {
+  const legacy = await readLegacyLocalStores();
+  if (!legacy) return;
+  const hasRows = STORE_NAMES.some((store) => (legacy[store] || []).length);
+  if (!hasRows) return;
+
+  const previous = state.shop;
+  state.shop = { id: shopIdValue };
+  resetIDB();
+  try {
+    for (const store of STORE_NAMES) {
+      if (legacy[store] && legacy[store].length) {
+        await storeReplace(store, legacy[store]);
+      }
+    }
+  } finally {
+    state.shop = previous;
+    resetIDB();
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Shop branding / profile                                             */
+/* ------------------------------------------------------------------ */
+
+function applyShopBranding() {
+  const name = shopName();
+  document.title = state.shop ? `${name} · Shop manager` : 'Ma Ngal Lay · Shop manager';
+  const title = $('shopTitle');
+  if (title) title.textContent = name;
+  const logo = $('shopLogo');
+  const logoUrl = state.shop && typeof state.shop.logo === 'string' ? state.shop.logo : '';
+  if (logo && logoUrl) logo.src = logoUrl;
+
+  const profileName = $('shopProfileName');
+  if (profileName) profileName.textContent = name;
+  const profileSlug = $('shopProfileSlug');
+  if (profileSlug) profileSlug.textContent = state.shop ? (state.shop.slug || '') : '';
+  const nameInput = $('shopNameEdit');
+  if (nameInput && state.shop) nameInput.value = state.shop.name || '';
+  const currency = $('shopCurrencyEdit');
+  if (currency && state.shop) currency.value = state.shop.currency || 'K';
+  const link = $('shopPublicLink');
+  if (link && state.shop) {
+    const url = publicShopUrl();
+    link.href = url;
+    link.textContent = url;
+  }
+}
+
+async function saveShopProfile() {
+  if (!state.shop || !state.authUser) {
+    toast('Sign in first');
+    return;
+  }
+  const name = $('shopNameEdit').value.trim().replace(/\s+/g, ' ');
+  const currency = ($('shopCurrencyEdit') && $('shopCurrencyEdit').value) || 'K';
+  if (name.length < 2) {
+    toast('Shop name is too short');
+    return;
+  }
+  try {
+    await ensureFirestore();
+    const now = nowISO();
+    await sync.fs.setDoc(sync.fs.doc(sync.db, 'shops', state.shop.id), {
+      name,
+      currency,
+      updatedAt: now
+    }, { merge: true });
+    await sync.fs.setDoc(publicInfoRef(), {
+      name,
+      slug: state.shop.slug || '',
+      currency,
+      logo: state.shop.logo || '',
+      updatedAt: now
+    }, { merge: true });
+    if (state.shop.slug) {
+      await sync.fs.setDoc(sync.fs.doc(sync.db, SHOP_SLUGS, state.shop.slug), {
+        name,
+        updatedAt: now
+      }, { merge: true });
+    }
+    state.shop.name = name;
+    state.shop.currency = currency;
+    metaSet(SHOP_CACHE_KEY, { uid: state.authUser.uid, shop: state.shop });
+    applyShopBranding();
+    renderAll();
+    toast('Shop updated');
+  } catch (err) {
+    console.warn('[shop] could not save the profile', err);
+    toast('Could not update the shop. Check the connection and try again.');
   }
 }
 
@@ -1911,59 +2392,14 @@ async function signOutOwner() {
   location.reload();
 }
 
-async function initFirebase() {
-  if (sync.ready || sync.initializing) return;
-  if (!firebaseConfigured()) {
-    updateSyncStatus('local', 'Local only — data stays on this device.');
-    return;
-  }
+let firestorePromise = null;
 
-  // Firestore was already initialized earlier in this page session (for
-  // example after a re-login). Reuse it instead of initializing twice.
-  if (sync.fs && sync.db) {
-    sync.ready = true;
-    if (sync.paused) {
-      try {
-        await sync.fs.disableNetwork(sync.db);
-      } catch (err) {
-        console.warn('[Firebase] could not keep the network paused', err);
-      }
-      updateSyncStatus('paused', SYNC_PAUSED_TEXT);
-      return;
-    }
-    try {
-      if (metaGet('pendingCloudRestore')) {
-        await replaceCloudData();
-        await storeClear('outbox');
-        metaSet('pendingCloudRestore', false);
-        sync.seeded = true;
-        metaSet('fbSeeded', true);
-        metaSet('fbSeededProject', window.FIREBASE_CONFIG.projectId);
-      } else {
-        await flushOutbox();
-      }
-      startFirebaseListeners();
-      updateSyncStatus('connecting', 'Waiting for Firestore…');
-    } catch (err) {
-      sync.ready = false;
-      handleSyncError(err);
-    }
-    if (sync.paused) {
-      try {
-        await sync.fs.disableNetwork(sync.db);
-      } catch (err) {
-        console.warn('[Firebase] could not keep the network paused', err);
-      }
-      updateSyncStatus('paused', SYNC_PAUSED_TEXT);
-      return;
-    }
-    return;
-  }
-  sync.initializing = true;
-  sync.fatal = false;
-  updateSyncStatus('connecting', 'Connecting to Firebase…');
-
-  try {
+// Initialize the Firestore SDK once, before sign-in completes. The auth flow
+// needs it to look up which shop belongs to the signed-in account.
+async function ensureFirestore() {
+  if (sync.fs && sync.db) return sync.db;
+  if (firestorePromise) return firestorePromise;
+  firestorePromise = (async () => {
     const [appModule, firestoreModule] = await Promise.all([
       import('./vendor/firebase/firebase-app.js'),
       import('./vendor/firebase/firebase-firestore.js')
@@ -1995,18 +2431,41 @@ async function initFirebase() {
 
     sync.fs = firestoreModule;
     sync.db = db;
+    return db;
+  })().catch((err) => {
+    firestorePromise = null;
+    throw err;
+  });
+  return firestorePromise;
+}
+
+async function initFirebase() {
+  if (sync.ready || sync.initializing) return;
+  if (!firebaseConfigured()) {
+    updateSyncStatus('local', 'Local only — data stays on this device.');
+    return;
+  }
+  if (!shopId()) {
+    updateSyncStatus('local', 'Choose a shop to start syncing.');
+    return;
+  }
+
+  sync.initializing = true;
+  sync.fatal = false;
+  updateSyncStatus('connecting', 'Connecting to Firebase…');
+
+  try {
+    await ensureFirestore();
     sync.ready = true;
     sync.seeded = Boolean(metaGet('fbSeeded')) && metaGet('fbSeededProject') === window.FIREBASE_CONFIG.projectId;
 
     if (sync.paused) {
       try {
-        await firestoreModule.disableNetwork(db);
+        await sync.fs.disableNetwork(sync.db);
       } catch (err) {
         console.warn('[Firebase] could not keep the network paused', err);
       }
       updateSyncStatus('paused', SYNC_PAUSED_TEXT);
-      sync.initializing = false;
-      updateSyncControls();
       return;
     }
 
@@ -2026,13 +2485,11 @@ async function initFirebase() {
 
     if (sync.paused) {
       try {
-        await firestoreModule.disableNetwork(db);
+        await sync.fs.disableNetwork(sync.db);
       } catch (err) {
         console.warn('[Firebase] could not keep the network paused', err);
       }
       updateSyncStatus('paused', SYNC_PAUSED_TEXT);
-      sync.initializing = false;
-      updateSyncControls();
       return;
     }
 
@@ -2040,13 +2497,12 @@ async function initFirebase() {
     updateSyncStatus('connecting', 'Waiting for Firestore…');
   } catch (err) {
     sync.ready = false;
-    sync.initializing = false;
     console.warn('[Firebase] could not start', err);
     handleSyncError(err);
-    return;
+  } finally {
+    sync.initializing = false;
+    updateSyncControls();
   }
-  sync.initializing = false;
-  updateSyncControls();
 }
 
 function startFirebaseListeners() {
@@ -2056,7 +2512,7 @@ function startFirebaseListeners() {
   sync.unsubs = [];
   for (const name of SYNC_COLLECTIONS) {
     const unsubscribe = sync.fs.onSnapshot(
-      sync.fs.collection(sync.db, name),
+      sync.fs.collection(sync.db, 'shops', shopId(), name),
       { includeMetadataChanges: true },
       (snapshot) => handleSnapshot(name, snapshot),
       (err) => handleSyncError(err, true)
@@ -2072,20 +2528,20 @@ async function replaceCloudData() {
     for (const name of SYNC_COLLECTIONS) {
       const records = state[name] || [];
       const keep = new Set(records.map((record) => record.id));
-      const existing = await sync.fs.getDocs(sync.fs.collection(sync.db, name));
+      const existing = await sync.fs.getDocs(shopCol(name));
       const stale = existing.docs.map((doc) => doc.id).filter((id) => !keep.has(id));
 
       for (let i = 0; i < records.length; i += 400) {
         const batch = sync.fs.writeBatch(sync.db);
         for (const record of records.slice(i, i + 400)) {
-          batch.set(sync.fs.doc(sync.db, name, record.id), cloudRecord(record));
+          batch.set(shopDoc(name, record.id), cloudRecord(record));
         }
         await batch.commit();
       }
       for (let i = 0; i < stale.length; i += 400) {
         const batch = sync.fs.writeBatch(sync.db);
         for (const id of stale.slice(i, i + 400)) {
-          batch.delete(sync.fs.doc(sync.db, name, id));
+          batch.delete(shopDoc(name, id));
         }
         await batch.commit();
       }
@@ -2099,12 +2555,12 @@ async function replaceCloudData() {
 async function deleteCloudCollection(name) {
   if (!sync.ready || !sync.fs || !sync.db) throw new Error('Firebase is not ready');
   if (!navigator.onLine) throw new Error('Offline');
-  const snapshot = await sync.fs.getDocs(sync.fs.collection(sync.db, name));
+  const snapshot = await sync.fs.getDocs(shopCol(name));
   const ids = snapshot.docs.map((doc) => doc.id);
   for (let i = 0; i < ids.length; i += 400) {
     const batch = sync.fs.writeBatch(sync.db);
     for (const id of ids.slice(i, i + 400)) {
-      batch.delete(sync.fs.doc(sync.db, name, id));
+      batch.delete(shopDoc(name, id));
     }
     await batch.commit();
   }
@@ -3231,6 +3687,7 @@ function voucherVerifyUrl(code) {
   if (!code) return '';
   try {
     const target = new URL('shop.html', location.href);
+    if (state.shop && state.shop.slug) target.searchParams.set('shop', state.shop.slug);
     target.hash = `voucher=${encodeURIComponent(code)}`;
     return target.href;
   } catch {
@@ -3408,7 +3865,7 @@ function printVoucher() {
   </style>
 </head>
 <body>
-  <div class="shop">Ma Ngal Lay</div>
+  <div class="shop">${escapeHtml(shopName())}</div>
   <h1>Purchase Voucher</h1>
   <div class="code">${escapeHtml(sale.voucherCode)}</div>
   ${qr ? `<img class="qr" src="${qr}" alt="Voucher QR">` : ''}
@@ -3996,6 +4453,34 @@ function switchTab(tab) {
 
 function bindEvents() {
   $('loginForm').addEventListener('submit', handleLoginSubmit);
+  $('showSignupBtn').addEventListener('click', () => {
+    showSignupError('');
+    showAuthCard('signup');
+    const input = $('signupEmail');
+    if (input) input.focus();
+  });
+  $('showLoginBtn').addEventListener('click', () => {
+    showSignupError('');
+    showAuthCard('login');
+  });
+  $('signupForm').addEventListener('submit', handleSignupSubmit);
+  $('shopSetupForm').addEventListener('submit', handleShopSetupSubmit);
+  $('shopNameInput').addEventListener('input', updateSetupSlug);
+  $('shopSlugInput').addEventListener('input', (event) => {
+    event.target.dataset.touched = 'true';
+    event.target.value = slugify(event.target.value);
+  });
+  $('shopSetupSignOut').addEventListener('click', signOutOwner);
+  $('saveShopProfileBtn').addEventListener('click', saveShopProfile);
+  $('copyShopLinkBtn').addEventListener('click', async () => {
+    const url = publicShopUrl();
+    try {
+      await navigator.clipboard.writeText(url);
+      toast('Public shop link copied');
+    } catch {
+      toast(url);
+    }
+  });
   $('forgotPasswordBtn').addEventListener('click', handleForgotPassword);
   $('changePasswordBtn').addEventListener('click', openPasswordDialog);
   $('signOutBtn').addEventListener('click', signOutOwner);
@@ -4237,15 +4722,19 @@ async function init() {
 
   bindEvents();
   redirectLegacyVoucherLink();
-  sync.paused = Boolean(metaGet('syncPaused'));
   updateSyncControls();
 
   if (firebaseConfigured()) {
-    updateSyncStatus('connecting', 'Checking owner sign-in…');
+    updateSyncStatus('connecting', 'Checking sign-in…');
     initAuth();
   } else {
     updateSyncStatus('local', 'Local only — data stays on this device.');
-    await unlockOwnerApp(null);
+    await enterShop(null, {
+      id: 'local',
+      name: DEFAULT_SHOP_NAME,
+      slug: DEFAULT_SHOP_SLUG,
+      currency: 'K'
+    });
   }
 
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {

@@ -14,7 +14,7 @@ future work.
 | Item | Detail |
 | --- | --- |
 | Name | Ma Ngal Lay mini mart |
-| Type | Private owner POS + public product/voucher page |
+| Type | Multi-shop POS + public product/voucher pages |
 | Owner app | <https://thantzinwine.github.io/ma-ngal-lay/> |
 | Public page | <https://thantzinwine.github.io/ma-ngal-lay/shop.html> |
 | Repository | `thantzinwine/ma-ngal-lay`, branch `main` |

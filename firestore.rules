@@ -1,49 +1,97 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // The shop manager (products, sales, changes) is readable and writable
-    // only by the signed-in owner account. The owner account has the custom
-    // claim { owner: true }, set once with the Firebase Admin API.
-    function isOwner() {
-      return request.auth != null && request.auth.token.owner == true;
+
+    // ------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------
+    function signedIn() {
+      return request.auth != null;
     }
 
-    match /products/{productId} {
-      allow read, write: if isOwner();
+    // The shop document records ownerUid. One owner account per shop.
+    function isShopOwner(shopId) {
+      return signedIn()
+        && get(/databases/$(database)/documents/shops/$(shopId)).data.ownerUid == request.auth.uid;
     }
 
-    match /sales/{saleId} {
-      allow read, write: if isOwner();
+    // Old single-shop owner account, kept only so it can migrate its data
+    // into the new shops/{shopId}/… layout. Remove this once migration is done.
+    function isLegacyOwner() {
+      return signedIn() && request.auth.token.owner == true;
     }
 
-    match /changes/{changeId} {
-      allow read, write: if isOwner();
+    // ------------------------------------------------------------------
+    // Account -> shop pointer. A user may only read/write their own row.
+    // ------------------------------------------------------------------
+    match /users/{uid} {
+      allow read, write: if signedIn() && request.auth.uid == uid;
     }
 
-    // Shop costs (stock purchases, electric, gas, rent…) are owner-only.
-    match /costs/{costId} {
-      allow read, write: if isOwner();
-    }
-
-    // Customer-safe catalog: names, categories, prices and availability only.
-    // Stock quantities are never written to this collection.
-    match /catalog/{productId} {
+    // ------------------------------------------------------------------
+    // Public slug directory: shop.html?shop=<slug> is resolved here.
+    // ------------------------------------------------------------------
+    match /shopSlugs/{slug} {
       allow read: if true;
-      allow write: if isOwner();
+      allow create: if signedIn()
+        && request.resource.data.ownerUid == request.auth.uid
+        && getAfter(/databases/$(database)/documents/shops/$(request.resource.data.shopId)).data.ownerUid == request.auth.uid;
+      allow update, delete: if signedIn()
+        && get(/databases/$(database)/documents/shopSlugs/$(slug)).data.ownerUid == request.auth.uid;
     }
 
-    // One document per voucher code. Anyone with the code may fetch that one
-    // voucher; only the owner can list the collection or see other vouchers.
+    // ------------------------------------------------------------------
+    // Shops: private metadata, owner only.
+    // ------------------------------------------------------------------
+    match /shops/{shopId} {
+      allow get: if isShopOwner(shopId);
+      allow create: if signedIn() && request.resource.data.ownerUid == request.auth.uid;
+      allow update, delete: if isShopOwner(shopId);
+
+      // Private shop data.
+      match /products/{docId} { allow read, write: if isShopOwner(shopId); }
+      match /sales/{docId}    { allow read, write: if isShopOwner(shopId); }
+      match /changes/{docId}  { allow read, write: if isShopOwner(shopId); }
+      match /costs/{docId}    { allow read, write: if isShopOwner(shopId); }
+      match /publicMeta/{docId} { allow read, write: if isShopOwner(shopId); }
+
+      // Customer-safe catalog: names, categories, prices and availability only.
+      // Stock quantities are never written to this collection.
+      match /catalog/{docId} {
+        allow read: if true;
+        allow write: if isShopOwner(shopId);
+      }
+
+      // Public shop card used for branding the storefront (name, logo, currency).
+      match /public/{docId} {
+        allow get: if true;
+        allow write: if isShopOwner(shopId);
+      }
+
+      // One document per voucher code. Anyone with the code may fetch that one
+      // voucher; only the shop owner can list the collection or write vouchers.
+      match /vouchers/{voucherCode} {
+        allow get: if true;
+        allow list: if isShopOwner(shopId);
+        allow write: if isShopOwner(shopId);
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Legacy single-shop collections. Readable/writable only by the old
+    // owner claim, and only until that owner has migrated into a shop.
+    // ------------------------------------------------------------------
+    match /products/{docId} { allow read, write: if isLegacyOwner(); }
+    match /sales/{docId}    { allow read, write: if isLegacyOwner(); }
+    match /changes/{docId}  { allow read, write: if isLegacyOwner(); }
+    match /costs/{docId}    { allow read, write: if isLegacyOwner(); }
+    // Keep the old public projections readable while the site switches over.
+    match /catalog/{docId}  { allow read: if true; allow write: if isLegacyOwner(); }
     match /vouchers/{voucherCode} {
       allow get: if true;
-      allow list: if isOwner();
-      allow write: if isOwner();
+      allow list, write: if isLegacyOwner();
     }
-
-    // Owner-only marker used to backfill the public collections once.
-    match /publicMeta/{docId} {
-      allow read, write: if isOwner();
-    }
+    match /publicMeta/{docId} { allow read, write: if isLegacyOwner(); }
 
     // Nothing else is public.
     match /{document=**} {

@@ -1,10 +1,13 @@
 /* Ma Ngal Lay — public shop page
- * Reads only the customer-safe `catalog` collection (no stock quantities)
- * and one voucher document at a time from `vouchers` (get only, no list).
+ * Reads one shop's customer-safe `catalog` collection (no stock quantities)
+ * and one voucher document at a time from that shop's `vouchers` collection.
+ * The shop is selected with ?shop=<slug>; old links fall back to the
+ * original Ma Ngal Lay slug.
  */
 
 const cfg = window.FIREBASE_CONFIG || {};
 
+const DEFAULT_SHOP_SLUG = 'ma-ngal-lay';
 const numberFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
 
 let db = null;
@@ -16,12 +19,25 @@ let verifyToken = 0;
 let scanner = null;
 let scannerRunning = false;
 let scanToken = 0;
+let shopSlug = DEFAULT_SHOP_SLUG;
+let shopId = '';
+let currency = 'K';
 
 const $ = (id) => document.getElementById(id);
 
+function readShopSlug() {
+  try {
+    const params = new URLSearchParams(location.search);
+    const value = String(params.get('shop') || '').trim().toLowerCase();
+    return /^[a-z0-9-]{2,30}$/.test(value) ? value : DEFAULT_SHOP_SLUG;
+  } catch {
+    return DEFAULT_SHOP_SLUG;
+  }
+}
+
 function money(value) {
   const n = Number(value);
-  return `${numberFormat.format(Number.isFinite(n) ? Math.round(n) : 0)} K`;
+  return `${numberFormat.format(Number.isFinite(n) ? Math.round(n) : 0)} ${currency}`;
 }
 
 function formatDateTime(iso) {
@@ -172,7 +188,7 @@ function bindCatalogControls() {
 
 function listenCatalog() {
   fs.onSnapshot(
-    fs.collection(db, 'catalog'),
+    fs.collection(db, 'shops', shopId, 'catalog'),
     (snapshot) => {
       allProducts = snapshot.docs
         .map((entry) => ({ id: entry.id, ...entry.data() }))
@@ -285,7 +301,7 @@ function handleVoucherScan(decodedText) {
   const code = extractCode(decodedText);
   stopVoucherScanner();
   if (!code) {
-    showVerifyError('That QR code is not a Ma Ngal Lay voucher.');
+    showVerifyError('That QR code is not a shop voucher.');
     return;
   }
   const input = $('voucherInput');
@@ -342,7 +358,7 @@ async function verifyVoucher(raw) {
   const token = ++verifyToken;
   setVerifyBusy(true);
   try {
-    const snapshot = await fs.getDoc(fs.doc(db, 'vouchers', code));
+    const snapshot = await fs.getDoc(fs.doc(db, 'shops', shopId, 'vouchers', code));
     if (token !== verifyToken) return;
     if (!snapshot.exists()) {
       error.textContent = 'No voucher found with that code. Check the code and try again.';
@@ -419,6 +435,47 @@ function bindVerifyControls() {
 }
 
 /* ------------------------------------------------------------------ */
+/* Shop lookup + branding                                              */
+/* ------------------------------------------------------------------ */
+
+function applyShopBranding(info) {
+  const name = (info && info.name) || 'Ma Ngal Lay';
+  if (typeof info.currency === 'string' && info.currency.trim()) currency = info.currency.trim();
+  document.title = `${name} · Products & Vouchers`;
+  const title = $('shopPageTitle');
+  if (title) title.textContent = name;
+  const footer = $('shopFooterName');
+  if (footer) footer.textContent = name;
+  const desc = document.querySelector('meta[name="description"]');
+  if (desc) desc.setAttribute('content', `${name} mini mart — browse products and prices, and verify a purchase voucher.`);
+  const logo = document.querySelector('.brand-mark img');
+  if (logo && info && typeof info.logo === 'string' && info.logo) logo.src = info.logo;
+}
+
+async function loadShop() {
+  shopSlug = readShopSlug();
+  const slugSnap = await fs.getDoc(fs.doc(db, 'shopSlugs', shopSlug));
+  if (!slugSnap.exists()) {
+    setStatus(`No shop found at “${shopSlug}”. Check the link from the shop and try again.`);
+    return false;
+  }
+  shopId = slugSnap.data().shopId;
+  if (!shopId) {
+    setStatus('This shop is not ready yet. Please try again later.');
+    return false;
+  }
+  let info = { name: slugSnap.data().name || 'Ma Ngal Lay' };
+  try {
+    const infoSnap = await fs.getDoc(fs.doc(db, 'shops', shopId, 'public', 'info'));
+    if (infoSnap.exists()) info = { ...info, ...infoSnap.data() };
+  } catch (err) {
+    console.warn('[public] shop info unavailable', err);
+  }
+  applyShopBranding(info);
+  return true;
+}
+
+/* ------------------------------------------------------------------ */
 /* Boot                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -446,6 +503,9 @@ async function init() {
         console.warn('[public] could not connect to the Firestore emulator', emulatorError);
       }
     }
+    setStatus('Loading products…');
+    const found = await loadShop();
+    if (!found) return;
     listenCatalog();
   } catch (err) {
     console.warn('[public] Firebase failed to start', err);
