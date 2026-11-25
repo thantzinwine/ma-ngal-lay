@@ -22,6 +22,7 @@ let scanToken = 0;
 let shopSlug = DEFAULT_SHOP_SLUG;
 let shopId = '';
 let currency = 'K';
+let legacyMode = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -187,8 +188,11 @@ function bindCatalogControls() {
 }
 
 function listenCatalog() {
+  const collectionRef = legacyMode
+    ? fs.collection(db, 'catalog')
+    : fs.collection(db, 'shops', shopId, 'catalog');
   fs.onSnapshot(
-    fs.collection(db, 'shops', shopId, 'catalog'),
+    collectionRef,
     (snapshot) => {
       allProducts = snapshot.docs
         .map((entry) => ({ id: entry.id, ...entry.data() }))
@@ -358,7 +362,9 @@ async function verifyVoucher(raw) {
   const token = ++verifyToken;
   setVerifyBusy(true);
   try {
-    const snapshot = await fs.getDoc(fs.doc(db, 'shops', shopId, 'vouchers', code));
+    const snapshot = await fs.getDoc(legacyMode
+    ? fs.doc(db, 'vouchers', code)
+    : fs.doc(db, 'shops', shopId, 'vouchers', code));
     if (token !== verifyToken) return;
     if (!snapshot.exists()) {
       error.textContent = 'No voucher found with that code. Check the code and try again.';
@@ -456,9 +462,16 @@ async function loadShop() {
   shopSlug = readShopSlug();
   const slugSnap = await fs.getDoc(fs.doc(db, 'shopSlugs', shopSlug));
   if (!slugSnap.exists()) {
+    if (shopSlug === DEFAULT_SHOP_SLUG) {
+      legacyMode = true;
+      shopId = '';
+      applyShopBranding({ name: 'Ma Ngal Lay', currency: 'K' });
+      return true;
+    }
     setStatus(`No shop found at “${shopSlug}”. Check the link from the shop and try again.`);
     return false;
   }
+  legacyMode = false;
   shopId = slugSnap.data().shopId;
   if (!shopId) {
     setStatus('This shop is not ready yet. Please try again later.');
